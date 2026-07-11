@@ -147,7 +147,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         selected.add(currentBranch);
       }
       if (!mounted) return;
-      final result = await showDialog<Set<String>>(
+      final result = await showDialog<List<String>>(
         context: context,
         builder: (_) => BranchSelectorDialog(
           repo: repo,
@@ -635,13 +635,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     final currentBranch = selectedRepo == null
         ? ''
         : _currentBranches[selectedRepo.id] ?? '';
-    final selectedBranches =
-        selectedRepo == null
-              ? <TrackedBranch>[]
-              : _branches
-                    .where((branch) => branch.repoId == selectedRepo.id)
-                    .toList()
-          ..sort((a, b) => a.branchName.compareTo(b.branchName));
+    final selectedBranches = selectedRepo == null
+        ? <TrackedBranch>[]
+        : _branches
+              .where((branch) => branch.repoId == selectedRepo.id)
+              .toList();
     final checkoutBlocked = selectedBranches.any(
       (branch) =>
           branch.branchName == currentBranch &&
@@ -1637,7 +1635,10 @@ class _BranchSelectorDialogState extends State<BranchSelectorDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(_selected),
+          onPressed: () => Navigator.of(context).pop([
+            for (final branch in _branches)
+              if (_selected.contains(branch)) branch,
+          ]),
           child: const Text('Track Selected'),
         ),
       ],
@@ -1670,7 +1671,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
       .toList();
   late Set<String> _enabledSources = {..._sourceOrder};
   var _mode = SyncMergeMode.bothDirections;
-  var _pushAfterSync = true;
+  var _pushAfterSync = false;
 
   void _setTarget(String target) {
     setState(() {
@@ -1740,8 +1741,8 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
               title: const Text('Push after sync'),
               subtitle: Text(
                 _mode == SyncMergeMode.bothDirections
-                    ? 'Push every selected branch after the sync succeeds.'
-                    : 'Push the target branch after the merge succeeds.',
+                    ? 'Off by default. Enable only when you want to push every selected branch.'
+                    : 'Off by default. Enable only when you want to push the target branch.',
               ),
               controlAffinity: ListTileControlAffinity.leading,
               onChanged: (checked) {
