@@ -1099,52 +1099,21 @@ class RepositoryDashboard extends StatelessWidget {
           if (branches.isEmpty)
             const EmptyState(text: 'No branches selected yet.')
           else
-            Expanded(
-              child: Stack(
-                children: [
-                  GridView.builder(
-                    itemCount: branches.length,
-                    gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                      maxCrossAxisExtent: cardSize,
-                      mainAxisExtent: cardSize * 0.92,
-                      crossAxisSpacing: 24,
-                      mainAxisSpacing: 24,
-                    ),
-                    itemBuilder: (context, index) => BranchCardDropZone(
-                      key: GlobalObjectKey(
-                        'branch-card-${repo.id}-${branches[index].branchName}',
-                      ),
-                      branch: branches[index],
-                      busy: busy,
-                      onSwap: (from) => onSwapBranches(from, branches[index]),
-                      child: BranchCard(
-                        branch: branches[index],
-                        isCurrentBranch:
-                            branches[index].branchName == currentBranch,
-                        checkoutBlocked: checkoutBlocked,
-                        busy: busy,
-                        onRefresh: () => onRefresh(branches[index]),
-                        onPull: () => onPull(branches[index]),
-                        onCheckout: () => onCheckout(branches[index]),
-                        onCommit: () => onCommit(branches[index]),
-                        onPush: () => onPush(branches[index]),
-                        onUndoCommit: () => onUndoCommit(branches[index]),
-                      ),
-                    ),
-                  ),
-                  if (syncAnimation != null)
-                    Positioned.fill(
-                      child: SyncMergeOverlay(
-                        repoId: repo.id,
-                        branches: branches
-                            .map((branch) => branch.branchName)
-                            .toList(),
-                        state: syncAnimation!,
-                        cardHeight: cardSize * 0.92,
-                      ),
-                    ),
-                ],
-              ),
+            BranchGrid(
+              repo: repo,
+              branches: branches,
+              currentBranch: currentBranch,
+              checkoutBlocked: checkoutBlocked,
+              busy: busy,
+              cardSize: cardSize,
+              syncAnimation: syncAnimation,
+              onSwapBranches: onSwapBranches,
+              onRefresh: onRefresh,
+              onPull: onPull,
+              onCheckout: onCheckout,
+              onCommit: onCommit,
+              onPush: onPush,
+              onUndoCommit: onUndoCommit,
             ),
           if (syncAnimation != null) ...[
             const SizedBox(height: 12),
@@ -1303,6 +1272,113 @@ class BranchCard extends StatelessWidget {
   }
 }
 
+class BranchGrid extends StatefulWidget {
+  const BranchGrid({
+    required this.repo,
+    required this.branches,
+    required this.currentBranch,
+    required this.checkoutBlocked,
+    required this.busy,
+    required this.cardSize,
+    required this.syncAnimation,
+    required this.onSwapBranches,
+    required this.onRefresh,
+    required this.onPull,
+    required this.onCheckout,
+    required this.onCommit,
+    required this.onPush,
+    required this.onUndoCommit,
+    super.key,
+  });
+
+  final RepositoryInfo repo;
+  final List<TrackedBranch> branches;
+  final String currentBranch;
+  final bool checkoutBlocked;
+  final bool busy;
+  final double cardSize;
+  final SyncAnimationState? syncAnimation;
+  final void Function(TrackedBranch from, TrackedBranch to) onSwapBranches;
+  final ValueChanged<TrackedBranch> onRefresh;
+  final ValueChanged<TrackedBranch> onPull;
+  final ValueChanged<TrackedBranch> onCheckout;
+  final ValueChanged<TrackedBranch> onCommit;
+  final ValueChanged<TrackedBranch> onPush;
+  final ValueChanged<TrackedBranch> onUndoCommit;
+
+  @override
+  State<BranchGrid> createState() => _BranchGridState();
+}
+
+class _BranchGridState extends State<BranchGrid> {
+  final _cardKeys = <String, GlobalKey>{};
+
+  @override
+  void didUpdateWidget(covariant BranchGrid oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final branchNames = widget.branches
+        .map((branch) => branch.branchName)
+        .toSet();
+    _cardKeys.removeWhere(
+      (branchName, key) => !branchNames.contains(branchName),
+    );
+  }
+
+  GlobalKey _keyFor(String branchName) {
+    return _cardKeys.putIfAbsent(branchName, GlobalKey.new);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Stack(
+        children: [
+          GridView.builder(
+            itemCount: widget.branches.length,
+            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: widget.cardSize,
+              mainAxisExtent: widget.cardSize * 0.92,
+              crossAxisSpacing: 24,
+              mainAxisSpacing: 24,
+            ),
+            itemBuilder: (context, index) {
+              final branch = widget.branches[index];
+              return KeyedSubtree(
+                key: _keyFor(branch.branchName),
+                child: BranchCardDropZone(
+                  branch: branch,
+                  busy: widget.busy,
+                  onSwap: (from) => widget.onSwapBranches(from, branch),
+                  child: BranchCard(
+                    branch: branch,
+                    isCurrentBranch: branch.branchName == widget.currentBranch,
+                    checkoutBlocked: widget.checkoutBlocked,
+                    busy: widget.busy,
+                    onRefresh: () => widget.onRefresh(branch),
+                    onPull: () => widget.onPull(branch),
+                    onCheckout: () => widget.onCheckout(branch),
+                    onCommit: () => widget.onCommit(branch),
+                    onPush: () => widget.onPush(branch),
+                    onUndoCommit: () => widget.onUndoCommit(branch),
+                  ),
+                ),
+              );
+            },
+          ),
+          if (widget.syncAnimation != null)
+            Positioned.fill(
+              child: SyncMergeOverlay(
+                cardKeys: _cardKeys,
+                state: widget.syncAnimation!,
+                cardHeight: widget.cardSize * 0.92,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 class BranchCardDropZone extends StatefulWidget {
   const BranchCardDropZone({
     required this.branch,
@@ -1412,15 +1488,13 @@ class SyncAnimationStep {
 
 class SyncMergeOverlay extends StatefulWidget {
   const SyncMergeOverlay({
-    required this.repoId,
-    required this.branches,
+    required this.cardKeys,
     required this.state,
     required this.cardHeight,
     super.key,
   });
 
-  final String repoId;
-  final List<String> branches;
+  final Map<String, GlobalKey> cardKeys;
   final SyncAnimationState state;
   final double cardHeight;
 
@@ -1469,16 +1543,15 @@ class _SyncMergeOverlayState extends State<SyncMergeOverlay>
     if (overlayBox == null || !overlayBox.hasSize) return const {};
 
     final centers = <String, Offset>{};
-    for (final branch in widget.branches) {
-      final key = GlobalObjectKey('branch-card-${widget.repoId}-$branch');
-      final cardContext = key.currentContext;
+    for (final entry in widget.cardKeys.entries) {
+      final cardContext = entry.value.currentContext;
       final cardBox = cardContext?.findRenderObject() as RenderBox?;
       if (cardBox == null || !cardBox.hasSize) continue;
 
       final globalCenter = cardBox.localToGlobal(
         cardBox.size.center(Offset.zero),
       );
-      centers[branch] = overlayBox.globalToLocal(globalCenter);
+      centers[entry.key] = overlayBox.globalToLocal(globalCenter);
     }
     return centers;
   }
