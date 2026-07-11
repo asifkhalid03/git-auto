@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +8,7 @@ import 'package:uuid/uuid.dart';
 import 'app_storage.dart';
 import 'git_service.dart';
 import 'models.dart';
+import 'update_service.dart';
 
 void main() {
   runApp(const GitWorkflowApp());
@@ -43,6 +45,7 @@ class GitWorkflowHome extends StatefulWidget {
 class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   final _storage = AppStorage();
   final _git = GitService();
+  final _updates = UpdateService();
   final _uuid = const Uuid();
 
   var _repositories = <RepositoryInfo>[];
@@ -54,7 +57,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   var _busy = false;
   var _autoRefreshing = false;
   var _cardSize = 360.0;
+  var _autoCheckUpdates = true;
+  var _checkingUpdates = false;
   String? _message;
+  String? _updateError;
+  ReleaseInfo? _latestRelease;
   SyncAnimationState? _syncAnimation;
   Timer? _autoRefreshTimer;
 
@@ -81,10 +88,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       _repositories = snapshot.repositories;
       _branches = snapshot.branches;
       _operations = snapshot.operations;
+      _autoCheckUpdates = snapshot.autoCheckUpdates;
       _selectedRepo = _repositories.firstOrNull;
       _loading = false;
     });
     unawaited(_loadCurrentBranches());
+    if (snapshot.autoCheckUpdates) {
+      unawaited(_checkForUpdates(silent: true));
+    }
   }
 
   Future<void> _loadCurrentBranches() async {
@@ -107,8 +118,61 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         repositories: _repositories,
         branches: _branches,
         operations: _operations.take(25).toList(),
+        autoCheckUpdates: _autoCheckUpdates,
       ),
     );
+  }
+
+  Future<void> _setAutoCheckUpdates(bool value) async {
+    setState(() => _autoCheckUpdates = value);
+    await _save();
+    if (value) {
+      await _checkForUpdates();
+    }
+  }
+
+  Future<void> _checkForUpdates({bool silent = false}) async {
+    if (_checkingUpdates) return;
+    setState(() {
+      _checkingUpdates = true;
+      _updateError = null;
+    });
+    try {
+      final release = await _updates.latestRelease();
+      if (!mounted) return;
+      setState(() {
+        _latestRelease = release;
+        if (!silent) {
+          _message = release.isNewerThanCurrent
+              ? 'Update available: v${release.version}'
+              : 'You are running the latest version.';
+        }
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _updateError = error.toString();
+        if (!silent) _message = 'Update check failed: $_updateError';
+      });
+    } finally {
+      if (mounted) {
+        setState(() => _checkingUpdates = false);
+      }
+    }
+  }
+
+  Future<void> _openReleasePage() async {
+    final url = _latestRelease?.url;
+    if (url == null || url.isEmpty) return;
+    if (Platform.isWindows) {
+      await Process.start('rundll32', ['url.dll,FileProtocolHandler', url]);
+      return;
+    }
+    if (Platform.isMacOS) {
+      await Process.start('open', [url]);
+      return;
+    }
+    await Process.start('xdg-open', [url]);
   }
 
   Future<void> _chooseRepository() async {
@@ -450,6 +514,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           targetBranch: request.targetBranch,
           sourceBranches: request.sourceBranches,
           bothDirections: request.bothDirections,
+          activeFromBranch: null,
+          activeToBranch: null,
+          completedSteps: const [],
         );
       });
       try {
@@ -458,6 +525,31 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           targetBranch: request.targetBranch,
           sourceBranches: request.sourceBranches,
           bothDirections: request.bothDirections,
+          onStep: (step) async {
+            if (!mounted) return;
+            setState(() {
+              final previous = _syncAnimation;
+              _syncAnimation = SyncAnimationState(
+                targetBranch: request.targetBranch,
+                sourceBranches: request.sourceBranches,
+                bothDirections: request.bothDirections,
+                activeFromBranch: step.fromBranch,
+                activeToBranch: step.toBranch,
+                completedSteps: previous == null
+                    ? const []
+                    : [
+                        ...previous.completedSteps,
+                        if (previous.activeFromBranch != null &&
+                            previous.activeToBranch != null)
+                          SyncAnimationStep(
+                            previous.activeFromBranch!,
+                            previous.activeToBranch!,
+                          ),
+                      ],
+              );
+            });
+            await Future<void>.delayed(const Duration(milliseconds: 260));
+          },
         );
         await _recordOperation(result);
         GitOperationResult? pushResult;
@@ -545,8 +637,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     }
     setState(() {
       _branches = [
-        ..._branches.where((branch) => branch.repoId != repo.id),
-        ...next,
+        for (final branch in _branches)
+          if (branch.repoId == repo.id)
+            next.firstWhere(
+              (item) => item.branchName == branch.branchName,
+              orElse: () => branch,
+            )
+          else
+            branch,
       ];
     });
     if (persist) {
@@ -605,6 +703,37 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
             branch,
       ];
     });
+  }
+
+  Future<void> _swapTrackedBranches(
+    RepositoryInfo repo,
+    TrackedBranch from,
+    TrackedBranch to,
+  ) async {
+    if (from.branchName == to.branchName) return;
+    setState(() {
+      final repoBranches = _branches
+          .where((branch) => branch.repoId == repo.id)
+          .toList();
+      final fromIndex = repoBranches.indexWhere(
+        (branch) => branch.branchName == from.branchName,
+      );
+      final toIndex = repoBranches.indexWhere(
+        (branch) => branch.branchName == to.branchName,
+      );
+      if (fromIndex == -1 || toIndex == -1) return;
+
+      final moved = repoBranches[fromIndex];
+      repoBranches[fromIndex] = repoBranches[toIndex];
+      repoBranches[toIndex] = moved;
+
+      _branches = [
+        ..._branches.where((branch) => branch.repoId != repo.id),
+        ...repoBranches,
+      ];
+      _message = 'Branch order saved.';
+    });
+    await _save();
   }
 
   Future<void> _guarded(Future<void> Function() action) async {
@@ -674,6 +803,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           operations: _operations,
                           message: _message,
                           busy: _busy,
+                          latestRelease: _latestRelease,
+                          checkingUpdates: _checkingUpdates,
+                          autoCheckUpdates: _autoCheckUpdates,
+                          updateError: _updateError,
                           syncAnimation: _syncAnimation,
                           checkoutBlocked: checkoutBlocked,
                           cardSize: _cardSize,
@@ -682,6 +815,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                               setState(() => _selectedRepo = repo),
                           onCardSizeChanged: (value) =>
                               setState(() => _cardSize = value),
+                          onCheckUpdates: _checkForUpdates,
+                          onOpenRelease: _openReleasePage,
+                          onAutoCheckUpdatesChanged: _setAutoCheckUpdates,
                           onEditBranches: () => _selectBranches(selectedRepo),
                           onRefresh: _refreshBranch,
                           onPull: _pullBranch,
@@ -689,6 +825,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           onCommit: _commitBranch,
                           onPush: _pushBranch,
                           onUndoCommit: _undoLastCommit,
+                          onSwapBranches: (from, to) =>
+                              _swapTrackedBranches(selectedRepo, from, to),
                           onSyncBranches: () => _syncBranches(
                             selectedRepo,
                             selectedBranches,
@@ -817,12 +955,19 @@ class RepositoryDashboard extends StatelessWidget {
     required this.operations,
     required this.message,
     required this.busy,
+    required this.latestRelease,
+    required this.checkingUpdates,
+    required this.autoCheckUpdates,
+    required this.updateError,
     required this.syncAnimation,
     required this.checkoutBlocked,
     required this.cardSize,
     required this.onChooseFolder,
     required this.onChangeRepo,
     required this.onCardSizeChanged,
+    required this.onCheckUpdates,
+    required this.onOpenRelease,
+    required this.onAutoCheckUpdatesChanged,
     required this.onEditBranches,
     required this.onRefresh,
     required this.onPull,
@@ -830,6 +975,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onCommit,
     required this.onPush,
     required this.onUndoCommit,
+    required this.onSwapBranches,
     required this.onSyncBranches,
     super.key,
   });
@@ -841,12 +987,19 @@ class RepositoryDashboard extends StatelessWidget {
   final List<GitOperationResult> operations;
   final String? message;
   final bool busy;
+  final ReleaseInfo? latestRelease;
+  final bool checkingUpdates;
+  final bool autoCheckUpdates;
+  final String? updateError;
   final SyncAnimationState? syncAnimation;
   final bool checkoutBlocked;
   final double cardSize;
   final VoidCallback onChooseFolder;
   final ValueChanged<RepositoryInfo> onChangeRepo;
   final ValueChanged<double> onCardSizeChanged;
+  final VoidCallback onCheckUpdates;
+  final VoidCallback onOpenRelease;
+  final ValueChanged<bool> onAutoCheckUpdatesChanged;
   final VoidCallback onEditBranches;
   final ValueChanged<TrackedBranch> onRefresh;
   final ValueChanged<TrackedBranch> onPull;
@@ -854,6 +1007,7 @@ class RepositoryDashboard extends StatelessWidget {
   final ValueChanged<TrackedBranch> onCommit;
   final ValueChanged<TrackedBranch> onPush;
   final ValueChanged<TrackedBranch> onUndoCommit;
+  final void Function(TrackedBranch from, TrackedBranch to) onSwapBranches;
   final VoidCallback onSyncBranches;
 
   @override
@@ -908,6 +1062,16 @@ class RepositoryDashboard extends StatelessWidget {
               ),
             ],
           ),
+          const SizedBox(height: 18),
+          UpdateStatusPanel(
+            latestRelease: latestRelease,
+            checking: checkingUpdates,
+            autoCheck: autoCheckUpdates,
+            error: updateError,
+            onCheck: onCheckUpdates,
+            onOpenRelease: onOpenRelease,
+            onAutoCheckChanged: onAutoCheckUpdatesChanged,
+          ),
           const Divider(height: 42),
           Row(
             children: [
@@ -946,28 +1110,36 @@ class RepositoryDashboard extends StatelessWidget {
                       crossAxisSpacing: 24,
                       mainAxisSpacing: 24,
                     ),
-                    itemBuilder: (context, index) => BranchCard(
+                    itemBuilder: (context, index) => BranchCardDropZone(
+                      key: GlobalObjectKey(
+                        'branch-card-${repo.id}-${branches[index].branchName}',
+                      ),
                       branch: branches[index],
-                      isCurrentBranch:
-                          branches[index].branchName == currentBranch,
-                      checkoutBlocked: checkoutBlocked,
                       busy: busy,
-                      onRefresh: () => onRefresh(branches[index]),
-                      onPull: () => onPull(branches[index]),
-                      onCheckout: () => onCheckout(branches[index]),
-                      onCommit: () => onCommit(branches[index]),
-                      onPush: () => onPush(branches[index]),
-                      onUndoCommit: () => onUndoCommit(branches[index]),
+                      onSwap: (from) => onSwapBranches(from, branches[index]),
+                      child: BranchCard(
+                        branch: branches[index],
+                        isCurrentBranch:
+                            branches[index].branchName == currentBranch,
+                        checkoutBlocked: checkoutBlocked,
+                        busy: busy,
+                        onRefresh: () => onRefresh(branches[index]),
+                        onPull: () => onPull(branches[index]),
+                        onCheckout: () => onCheckout(branches[index]),
+                        onCommit: () => onCommit(branches[index]),
+                        onPush: () => onPush(branches[index]),
+                        onUndoCommit: () => onUndoCommit(branches[index]),
+                      ),
                     ),
                   ),
                   if (syncAnimation != null)
                     Positioned.fill(
                       child: SyncMergeOverlay(
+                        repoId: repo.id,
                         branches: branches
                             .map((branch) => branch.branchName)
                             .toList(),
                         state: syncAnimation!,
-                        maxCardExtent: cardSize,
                         cardHeight: cardSize * 0.92,
                       ),
                     ),
@@ -1131,16 +1303,91 @@ class BranchCard extends StatelessWidget {
   }
 }
 
+class BranchCardDropZone extends StatefulWidget {
+  const BranchCardDropZone({
+    required this.branch,
+    required this.busy,
+    required this.onSwap,
+    required this.child,
+    super.key,
+  });
+
+  final TrackedBranch branch;
+  final bool busy;
+  final ValueChanged<TrackedBranch> onSwap;
+  final Widget child;
+
+  @override
+  State<BranchCardDropZone> createState() => _BranchCardDropZoneState();
+}
+
+class _BranchCardDropZoneState extends State<BranchCardDropZone> {
+  var _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final draggable = LongPressDraggable<TrackedBranch>(
+      data: widget.branch,
+      delay: const Duration(milliseconds: 180),
+      feedback: Material(
+        color: Colors.transparent,
+        child: SizedBox(
+          width: 300,
+          child: Opacity(opacity: 0.86, child: widget.child),
+        ),
+      ),
+      childWhenDragging: Opacity(opacity: 0.42, child: widget.child),
+      child: widget.child,
+    );
+
+    return DragTarget<TrackedBranch>(
+      onWillAcceptWithDetails: (details) {
+        final accepts =
+            !widget.busy &&
+            details.data.repoId == widget.branch.repoId &&
+            details.data.branchName != widget.branch.branchName;
+        setState(() => _hovering = accepts);
+        return accepts;
+      },
+      onLeave: (_) => setState(() => _hovering = false),
+      onAcceptWithDetails: (details) {
+        setState(() => _hovering = false);
+        widget.onSwap(details.data);
+      },
+      builder: (context, candidateData, rejectedData) {
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: _hovering ? const Color(0xFF5865F2) : Colors.transparent,
+              width: 2,
+            ),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          padding: EdgeInsets.all(_hovering ? 3 : 0),
+          child: widget.busy ? widget.child : draggable,
+        );
+      },
+    );
+  }
+}
+
 class SyncAnimationState {
   const SyncAnimationState({
     required this.targetBranch,
     required this.sourceBranches,
     required this.bothDirections,
+    required this.activeFromBranch,
+    required this.activeToBranch,
+    required this.completedSteps,
   });
 
   final String targetBranch;
   final List<String> sourceBranches;
   final bool bothDirections;
+  final String? activeFromBranch;
+  final String? activeToBranch;
+  final List<SyncAnimationStep> completedSteps;
 
   bool includes(String branchName) =>
       branchName == targetBranch || sourceBranches.contains(branchName);
@@ -1150,20 +1397,31 @@ class SyncAnimationState {
   String get label => bothDirections
       ? orderedBranches.join(' <-> ')
       : '${sourceBranches.join(' -> ')} -> $targetBranch';
+
+  String get activeLabel => activeFromBranch == null || activeToBranch == null
+      ? 'Preparing sync'
+      : 'Merging $activeFromBranch -> $activeToBranch';
+}
+
+class SyncAnimationStep {
+  const SyncAnimationStep(this.fromBranch, this.toBranch);
+
+  final String fromBranch;
+  final String toBranch;
 }
 
 class SyncMergeOverlay extends StatefulWidget {
   const SyncMergeOverlay({
+    required this.repoId,
     required this.branches,
     required this.state,
-    required this.maxCardExtent,
     required this.cardHeight,
     super.key,
   });
 
+  final String repoId;
   final List<String> branches;
   final SyncAnimationState state;
-  final double maxCardExtent;
   final double cardHeight;
 
   @override
@@ -1196,9 +1454,8 @@ class _SyncMergeOverlayState extends State<SyncMergeOverlay>
         animation: _controller,
         builder: (context, _) => CustomPaint(
           painter: SyncMergePainter(
-            branches: widget.branches,
+            centers: _cardCenters(context),
             state: widget.state,
-            maxCardExtent: widget.maxCardExtent,
             cardHeight: widget.cardHeight,
             progress: _controller.value,
           ),
@@ -1206,126 +1463,123 @@ class _SyncMergeOverlayState extends State<SyncMergeOverlay>
       ),
     );
   }
+
+  Map<String, Offset> _cardCenters(BuildContext context) {
+    final overlayBox = context.findRenderObject() as RenderBox?;
+    if (overlayBox == null || !overlayBox.hasSize) return const {};
+
+    final centers = <String, Offset>{};
+    for (final branch in widget.branches) {
+      final key = GlobalObjectKey('branch-card-${widget.repoId}-$branch');
+      final cardContext = key.currentContext;
+      final cardBox = cardContext?.findRenderObject() as RenderBox?;
+      if (cardBox == null || !cardBox.hasSize) continue;
+
+      final globalCenter = cardBox.localToGlobal(
+        cardBox.size.center(Offset.zero),
+      );
+      centers[branch] = overlayBox.globalToLocal(globalCenter);
+    }
+    return centers;
+  }
 }
 
 class SyncMergePainter extends CustomPainter {
   const SyncMergePainter({
-    required this.branches,
+    required this.centers,
     required this.state,
-    required this.maxCardExtent,
     required this.cardHeight,
     required this.progress,
   });
 
-  final List<String> branches;
+  final Map<String, Offset> centers;
   final SyncAnimationState state;
-  final double maxCardExtent;
   final double cardHeight;
   final double progress;
 
-  static const _spacing = 24.0;
-
   @override
   void paint(Canvas canvas, Size size) {
-    if (branches.length < 2 || size.width <= 0) return;
-
-    final centers = _branchCenters(size);
-    final target = centers[state.targetBranch];
-    if (target == null) return;
-
-    final glowPaint = Paint()
-      ..color = const Color(0xFF5865F2).withValues(alpha: 0.12)
-      ..style = PaintingStyle.fill;
-    final targetPulse = 42 + 10 * progress;
-    canvas.drawCircle(target, targetPulse, glowPaint);
-    canvas.drawCircle(
-      target,
-      24,
-      glowPaint..color = const Color(0xFF0EA044).withValues(alpha: 0.16),
-    );
-
-    final linePaint = Paint()
-      ..color = const Color(0xFF5865F2).withValues(alpha: 0.5)
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
-    final dotPaint = Paint()
-      ..color = const Color(0xFF5865F2)
-      ..style = PaintingStyle.fill;
-    final sourcePaint = Paint()
-      ..color = const Color(0xFFDD8500).withValues(alpha: 0.16)
-      ..style = PaintingStyle.fill;
-
-    final links = state.bothDirections
-        ? [
-            for (var i = 1; i < state.orderedBranches.length; i++)
-              (
-                from: state.orderedBranches[i - 1],
-                to: state.orderedBranches[i],
-              ),
-            for (var i = state.orderedBranches.length - 2; i >= 0; i--)
-              (
-                from: state.orderedBranches[i + 1],
-                to: state.orderedBranches[i],
-              ),
-          ]
-        : [
-            for (final source in state.sourceBranches)
-              (from: source, to: state.targetBranch),
-          ];
-
-    for (var i = 0; i < links.length; i++) {
-      final source = centers[links[i].from];
-      final destination = centers[links[i].to];
-      if (source == null || destination == null || source == destination) {
-        continue;
-      }
-
-      canvas.drawCircle(
-        source,
-        28 + 4 * ((progress + i * 0.2) % 1),
-        sourcePaint,
+    if (centers.length < 2 || size.width <= 0) return;
+    for (final step in state.completedSteps) {
+      _drawLink(
+        canvas,
+        centers,
+        from: step.fromBranch,
+        to: step.toBranch,
+        progress: 1,
+        active: false,
       );
+    }
 
-      final control = Offset(
-        (source.dx + destination.dx) / 2,
-        (source.dy + destination.dy) / 2 - 56,
+    if (state.activeFromBranch != null && state.activeToBranch != null) {
+      _drawLink(
+        canvas,
+        centers,
+        from: state.activeFromBranch!,
+        to: state.activeToBranch!,
+        progress: progress,
+        active: true,
       );
-      final path = Path()
-        ..moveTo(source.dx, source.dy)
-        ..quadraticBezierTo(
-          control.dx,
-          control.dy,
-          destination.dx,
-          destination.dy,
-        );
-      canvas.drawPath(path, linePaint);
-
-      for (var dot = 0; dot < 3; dot++) {
-        final t = (progress + dot / 3 + i * 0.12) % 1;
-        final point = _quadraticPoint(source, control, destination, t);
-        canvas.drawCircle(point, 5.5, dotPaint);
-      }
     }
   }
 
-  Map<String, Offset> _branchCenters(Size size) {
-    final columns = (size.width / maxCardExtent).ceil().clamp(
-      1,
-      branches.length,
+  void _drawLink(
+    Canvas canvas,
+    Map<String, Offset> centers, {
+    required String from,
+    required String to,
+    required double progress,
+    required bool active,
+  }) {
+    final source = centers[from];
+    final destination = centers[to];
+    if (source == null || destination == null || source == destination) return;
+
+    final linePaint = Paint()
+      ..color = (active ? const Color(0xFF5865F2) : const Color(0xFF8A94A6))
+          .withValues(alpha: active ? 0.72 : 0.26)
+      ..strokeWidth = active ? 4 : 2
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round;
+    final dotPaint = Paint()
+      ..color = active ? const Color(0xFF5865F2) : const Color(0xFF8A94A6)
+      ..style = PaintingStyle.fill;
+    final sourcePaint = Paint()
+      ..color = const Color(0xFFDD8500).withValues(alpha: active ? 0.22 : 0.08)
+      ..style = PaintingStyle.fill;
+    final targetPaint = Paint()
+      ..color = const Color(0xFF0EA044).withValues(alpha: active ? 0.20 : 0.08)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawCircle(source, active ? 28 + 5 * progress : 18, sourcePaint);
+    canvas.drawCircle(
+      destination,
+      active ? 32 + 8 * progress : 20,
+      targetPaint,
     );
-    final cardWidth = (size.width - _spacing * (columns - 1)) / columns;
-    final centers = <String, Offset>{};
-    for (var i = 0; i < branches.length; i++) {
-      final column = i % columns;
-      final row = i ~/ columns;
-      final x = column * (cardWidth + _spacing) + cardWidth / 2;
-      final y = row * (cardHeight + _spacing) + cardHeight / 2;
-      if (y <= size.height + cardHeight) {
-        centers[branches[i]] = Offset(x, y);
-      }
+
+    final verticalDelta = (source.dy - destination.dy).abs();
+    final controlLift = verticalDelta > cardHeight * 0.4 ? 20 : 56;
+    final control = Offset(
+      (source.dx + destination.dx) / 2,
+      (source.dy + destination.dy) / 2 - controlLift,
+    );
+    final path = Path()
+      ..moveTo(source.dx, source.dy)
+      ..quadraticBezierTo(
+        control.dx,
+        control.dy,
+        destination.dx,
+        destination.dy,
+      );
+    canvas.drawPath(path, linePaint);
+
+    if (!active) return;
+    for (var dot = 0; dot < 3; dot++) {
+      final t = (progress + dot / 3) % 1;
+      final point = _quadraticPoint(source, control, destination, t);
+      canvas.drawCircle(point, 6, dotPaint);
     }
-    return centers;
   }
 
   Offset _quadraticPoint(Offset start, Offset control, Offset end, double t) {
@@ -1343,9 +1597,8 @@ class SyncMergePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant SyncMergePainter oldDelegate) {
     return oldDelegate.progress != progress ||
-        oldDelegate.branches != branches ||
+        oldDelegate.centers != centers ||
         oldDelegate.state != state ||
-        oldDelegate.maxCardExtent != maxCardExtent ||
         oldDelegate.cardHeight != cardHeight;
   }
 }
@@ -1369,13 +1622,28 @@ class SyncMergeLegend extends StatelessWidget {
             const Icon(Icons.sync, size: 18, color: Color(0xFF5865F2)),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(
-                state.label,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Color(0xFF344160),
-                  fontWeight: FontWeight.w600,
-                ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    state.activeLabel,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF344160),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    state.label,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF647086),
+                      fontSize: 12,
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -1423,6 +1691,176 @@ class BranchCardSizeSlider extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class UpdateStatusPanel extends StatelessWidget {
+  const UpdateStatusPanel({
+    required this.latestRelease,
+    required this.checking,
+    required this.autoCheck,
+    required this.error,
+    required this.onCheck,
+    required this.onOpenRelease,
+    required this.onAutoCheckChanged,
+    super.key,
+  });
+
+  final ReleaseInfo? latestRelease;
+  final bool checking;
+  final bool autoCheck;
+  final String? error;
+  final VoidCallback onCheck;
+  final VoidCallback onOpenRelease;
+  final ValueChanged<bool> onAutoCheckChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final release = latestRelease;
+    final hasUpdate = release?.isNewerThanCurrent ?? false;
+    final statusText = error != null
+        ? 'Check failed'
+        : checking
+        ? 'Checking'
+        : hasUpdate
+        ? 'Update available'
+        : release == null
+        ? 'Not checked'
+        : 'Up to date';
+    final statusColor = error != null
+        ? const Color(0xFFCF3030)
+        : hasUpdate
+        ? const Color(0xFFDD8500)
+        : const Color(0xFF0EA044);
+
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF7F8FF),
+        border: Border.all(color: const Color(0xFFE0E5EE)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Icon(Icons.system_update_alt, color: statusColor),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Wrap(
+                spacing: 18,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  VersionPair(
+                    label: 'Current',
+                    value: 'v$appVersion',
+                    strong: true,
+                  ),
+                  VersionPair(
+                    label: 'Latest',
+                    value: release == null ? '-' : 'v${release.version}',
+                    strong: hasUpdate,
+                  ),
+                  StatusPill(text: statusText, color: statusColor),
+                  if (error != null)
+                    Text(
+                      error!,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Color(0xFFCF3030)),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Auto check',
+                  style: TextStyle(color: Color(0xFF647086)),
+                ),
+                Switch(
+                  value: autoCheck,
+                  onChanged: checking ? null : onAutoCheckChanged,
+                ),
+                IconButton(
+                  tooltip: 'Check for updates',
+                  onPressed: checking ? null : onCheck,
+                  icon: checking
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.refresh),
+                ),
+                OutlinedButton.icon(
+                  onPressed: release?.url.isEmpty ?? true
+                      ? null
+                      : onOpenRelease,
+                  icon: const Icon(Icons.open_in_new),
+                  label: const Text('Release'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class VersionPair extends StatelessWidget {
+  const VersionPair({
+    required this.label,
+    required this.value,
+    required this.strong,
+    super.key,
+  });
+
+  final String label;
+  final String value;
+  final bool strong;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('$label: ', style: const TextStyle(color: Color(0xFF647086))),
+        Text(
+          value,
+          style: TextStyle(
+            color: const Color(0xFF0B1736),
+            fontWeight: strong ? FontWeight.w800 : FontWeight.w600,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class StatusPill extends StatelessWidget {
+  const StatusPill({required this.text, required this.color, super.key});
+
+  final String text;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Text(
+          text,
+          style: TextStyle(color: color, fontWeight: FontWeight.w800),
+        ),
       ),
     );
   }
@@ -2307,8 +2745,8 @@ extension on GitOperationResult {
     operation: operation,
     branchName: branchName,
     success: success,
-    stdout: stdout,
-    stderr: stderr,
+    stdout: this.stdout,
+    stderr: this.stderr,
     startedAt: startedAt,
     finishedAt: finishedAt,
   );

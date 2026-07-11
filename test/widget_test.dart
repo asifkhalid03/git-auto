@@ -1,5 +1,6 @@
 import 'package:automation_git_workflow/main.dart';
 import 'package:automation_git_workflow/models.dart';
+import 'package:automation_git_workflow/update_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -76,5 +77,11 @@ void main() {
     expect(find.text('ecommerce-project'), findsOneWidget);
     expect(find.text(r'D:\Projects\ecommerce-project'), findsOneWidget);
     expect(find.byIcon(Icons.check_circle), findsOneWidget);
+  });
+
+  test('compareVersions handles release tags', () {
+    expect(compareVersions('1.0.3', '1.0.2'), greaterThan(0));
+    expect(compareVersions('v1.0.2', '1.0.2'), 0);
+    expect(compareVersions('1.0.1', '1.0.2'), lessThan(0));
   });
 }

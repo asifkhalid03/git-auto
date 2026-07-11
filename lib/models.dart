@@ -205,16 +205,19 @@ class AppStateSnapshot {
     required this.repositories,
     required this.branches,
     required this.operations,
+    this.autoCheckUpdates = true,
   });
 
   final List<RepositoryInfo> repositories;
   final List<TrackedBranch> branches;
   final List<GitOperationResult> operations;
+  final bool autoCheckUpdates;
 
   Map<String, dynamic> toJson() => {
     'repositories': repositories.map((repo) => repo.toJson()).toList(),
     'branches': branches.map((branch) => branch.toJson()).toList(),
     'operations': operations.map((op) => op.toJson()).toList(),
+    'autoCheckUpdates': autoCheckUpdates,
   };
 
   factory AppStateSnapshot.fromJson(String source) {
@@ -231,6 +234,7 @@ class AppStateSnapshot {
             (item) => GitOperationResult.fromJson(item as Map<String, dynamic>),
           )
           .toList(),
+      autoCheckUpdates: json['autoCheckUpdates'] as bool? ?? true,
     );
   }
 
@@ -238,5 +242,6 @@ class AppStateSnapshot {
     repositories: [],
     branches: [],
     operations: [],
+    autoCheckUpdates: true,
   );
 }

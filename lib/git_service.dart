@@ -4,6 +4,13 @@ import 'package:path/path.dart' as p;
 
 import 'models.dart';
 
+class SyncMergeStep {
+  const SyncMergeStep({required this.fromBranch, required this.toBranch});
+
+  final String fromBranch;
+  final String toBranch;
+}
+
 class GitService {
   Future<RepositoryInfo> validateRepository({
     required String path,
@@ -313,6 +320,7 @@ class GitService {
     required String targetBranch,
     required List<String> sourceBranches,
     bool bothDirections = false,
+    Future<void> Function(SyncMergeStep step)? onStep,
   }) async {
     final startedAt = DateTime.now();
     final sources = sourceBranches
@@ -344,6 +352,7 @@ class GitService {
     var combined = _GitProcessResult(exitCode: 0, stdout: '', stderr: '');
 
     Future<bool> mergeInto(String target, String source) async {
+      await onStep?.call(SyncMergeStep(fromBranch: source, toBranch: target));
       final checkout = await checkoutBranch(
         repoPath: repoPath,
         branchName: target,
