@@ -1,17 +1,42 @@
-# automation_git_workflow
+# Git Auto
 
-A new Flutter project.
+Flutter desktop app for managing local Git repositories across selected branches.
 
-## Getting Started
+## Features
 
-This project is a starting point for a Flutter application.
+- Add a local Git repository from a folder.
+- Select branches to track.
+- View branch freshness, latest commit, pull time, and local changes.
+- Pull, commit, undo commit, push, refresh, and checkout the current branch.
+- Sync and merge selected branches in one-way or both-directions mode.
+- Optionally push synced branches after sync finishes.
+- Return to the selected start branch after sync completes.
 
-A few resources to get you started if this is your first Flutter project:
+## Screenshots
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+### Dashboard Sync View
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+![Dashboard sync animation](docs/images/dashboard-sync-animation.png)
+
+### Branch Selector
+
+![Branch selector](docs/images/branch-selector.png)
+
+### Sync / Merge Dialog
+
+![Sync merge dialog](docs/images/sync-merge-dialog.png)
+
+## Build
+
+A Windows x64 release build is included:
+
+[releases/automation_git_workflow_windows_x64_release.zip](releases/automation_git_workflow_windows_x64_release.zip)
+
+## Development
+
+```powershell
+flutter pub get
+flutter analyze
+flutter test
+flutter build windows
+```
