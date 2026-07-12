@@ -14,6 +14,10 @@ Flutter desktop app for managing local Git repositories across selected branches
 
 ## Screenshots
 
+### Responsive Dark Dashboard
+
+![Responsive dark dashboard](docs/images/dashboard-dark-responsive.png)
+
 ### Dashboard Sync View
 
 ![Dashboard sync animation](docs/images/dashboard-sync-animation.png)

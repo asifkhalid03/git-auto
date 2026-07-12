@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -1321,17 +1322,22 @@ class RepositoryDashboard extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final sidePanelWidth = constraints.maxWidth < 1200
-            ? 200.0
-            : constraints.maxWidth < 1450
-            ? 230.0
-            : 292.0;
-        final gap = constraints.maxWidth < 1450 ? 12.0 : 22.0;
+        final isCompact = constraints.maxWidth < 1200;
+        final isMedium = constraints.maxWidth < 1450;
+        final sidePanelWidth = isCompact
+            ? 220.0
+            : isMedium
+            ? 260.0
+            : 320.0;
+        final gap = isMedium ? 12.0 : 22.0;
+        final panelHeight = constraints.maxHeight.isFinite
+            ? constraints.maxHeight
+            : 720.0;
         return Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
-              height: 720,
+              height: panelHeight,
               child: CurrentBranchHistoryPanel(
                 width: sidePanelWidth,
                 branchName: currentBranch,
@@ -1340,167 +1346,196 @@ class RepositoryDashboard extends StatelessWidget {
             ),
             SizedBox(width: gap),
             Expanded(
-              child: AppPanel(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.folder_outlined,
-                          size: 42,
-                          color: Color(0xFF5865F2),
-                        ),
-                        const SizedBox(width: 24),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+              child: SizedBox(
+                height: panelHeight,
+                child: AppPanel(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.folder_outlined,
+                            size: 42,
+                            color: Color(0xFF5865F2),
+                          ),
+                          const SizedBox(width: 24),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  repo.name,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.headlineSmall,
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  repo.path,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    color: mutedTextColor(context),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                CurrentBranchInline(branchName: currentBranch),
+                              ],
+                            ),
+                          ),
+                          DropdownButton<RepositoryInfo>(
+                            value: repo,
+                            items: repositories
+                                .map(
+                                  (item) => DropdownMenuItem(
+                                    value: item,
+                                    child: Text(item.name),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (value) {
+                              if (value != null) onChangeRepo(value);
+                            },
+                          ),
+                          const SizedBox(width: 12),
+                          Tooltip(
+                            message: darkMode
+                                ? 'Switch to light mode'
+                                : 'Switch to dark mode',
+                            child: Switch(
+                              value: darkMode,
+                              onChanged: busy ? null : onDarkModeChanged,
+                            ),
+                          ),
+                          Icon(
+                            darkMode ? Icons.dark_mode : Icons.light_mode,
+                            color: Theme.of(context).colorScheme.primary,
+                          ),
+                          const SizedBox(width: 12),
+                          OutlinedButton.icon(
+                            onPressed: busy ? null : onChooseFolder,
+                            icon: const Icon(Icons.add),
+                            label: const Text('Add Repo'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 18),
+                      UpdateStatusPanel(
+                        latestRelease: latestRelease,
+                        checking: checkingUpdates,
+                        autoCheck: autoCheckUpdates,
+                        error: updateError,
+                        onCheck: onCheckUpdates,
+                        onOpenRelease: onOpenRelease,
+                        onInstallUpdate: onInstallUpdate,
+                        onAutoCheckChanged: onAutoCheckUpdatesChanged,
+                      ),
+                      const Divider(height: 42),
+                      LayoutBuilder(
+                        builder: (context, toolbarConstraints) {
+                          final controls = Wrap(
+                            spacing: 12,
+                            runSpacing: 10,
+                            crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
-                              Text(
-                                repo.name,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(
-                                  context,
-                                ).textTheme.headlineSmall,
+                              BranchCardSizeSlider(
+                                value: cardSize,
+                                onChanged: busy ? null : onCardSizeChanged,
                               ),
-                              const SizedBox(height: 8),
-                              Text(
-                                repo.path,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: mutedTextColor(context),
-                                ),
+                              OutlinedButton.icon(
+                                onPressed: busy || branches.length < 2
+                                    ? null
+                                    : onSyncBranches,
+                                icon: const Icon(Icons.merge_type),
+                                label: const Text('Sync / Merge'),
                               ),
-                              const SizedBox(height: 8),
-                              CurrentBranchInline(branchName: currentBranch),
+                              OutlinedButton.icon(
+                                onPressed: busy ? null : onEditBranches,
+                                icon: const Icon(Icons.tune),
+                                label: const Text('Select Branches'),
+                              ),
                             ],
-                          ),
-                        ),
-                        DropdownButton<RepositoryInfo>(
-                          value: repo,
-                          items: repositories
-                              .map(
-                                (item) => DropdownMenuItem(
-                                  value: item,
-                                  child: Text(item.name),
+                          );
+                          final title = Text(
+                            'Branches',
+                            style: Theme.of(context).textTheme.titleLarge,
+                          );
+                          if (toolbarConstraints.maxWidth < 720) {
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                title,
+                                const SizedBox(height: 12),
+                                controls,
+                              ],
+                            );
+                          }
+                          return Row(
+                            children: [
+                              title,
+                              const Spacer(),
+                              Flexible(
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: controls,
                                 ),
-                              )
-                              .toList(),
-                          onChanged: (value) {
-                            if (value != null) onChangeRepo(value);
-                          },
-                        ),
-                        const SizedBox(width: 12),
-                        Tooltip(
-                          message: darkMode
-                              ? 'Switch to light mode'
-                              : 'Switch to dark mode',
-                          child: Switch(
-                            value: darkMode,
-                            onChanged: busy ? null : onDarkModeChanged,
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 22),
+                      if (branches.isEmpty)
+                        const EmptyState(text: 'No branches selected yet.')
+                      else
+                        Expanded(
+                          child: BranchGrid(
+                            repo: repo,
+                            branches: branches,
+                            currentBranch: currentBranch,
+                            checkoutBlocked: checkoutBlocked,
+                            busy: busy,
+                            cardSize: cardSize,
+                            syncAnimation: syncAnimation,
+                            onSwapBranches: onSwapBranches,
+                            onRefresh: onRefresh,
+                            onPull: onPull,
+                            onCheckout: onCheckout,
+                            onCommit: onCommit,
+                            onPush: onPush,
+                            onUndoCommit: onUndoCommit,
                           ),
                         ),
-                        Icon(
-                          darkMode ? Icons.dark_mode : Icons.light_mode,
-                          color: Theme.of(context).colorScheme.primary,
-                        ),
-                        const SizedBox(width: 12),
-                        OutlinedButton.icon(
-                          onPressed: busy ? null : onChooseFolder,
-                          icon: const Icon(Icons.add),
-                          label: const Text('Add Repo'),
-                        ),
+                      if (syncAnimation != null) ...[
+                        const SizedBox(height: 12),
+                        SyncMergeLegend(state: syncAnimation!),
                       ],
-                    ),
-                    const SizedBox(height: 18),
-                    UpdateStatusPanel(
-                      latestRelease: latestRelease,
-                      checking: checkingUpdates,
-                      autoCheck: autoCheckUpdates,
-                      error: updateError,
-                      onCheck: onCheckUpdates,
-                      onOpenRelease: onOpenRelease,
-                      onInstallUpdate: onInstallUpdate,
-                      onAutoCheckChanged: onAutoCheckUpdatesChanged,
-                    ),
-                    const Divider(height: 42),
-                    Row(
-                      children: [
+                      if (message != null) ...[
+                        const SizedBox(height: 12),
                         Text(
-                          'Branches',
-                          style: Theme.of(context).textTheme.titleLarge,
-                        ),
-                        const Spacer(),
-                        BranchCardSizeSlider(
-                          value: cardSize,
-                          onChanged: busy ? null : onCardSizeChanged,
-                        ),
-                        const SizedBox(width: 16),
-                        OutlinedButton.icon(
-                          onPressed: busy || branches.length < 2
-                              ? null
-                              : onSyncBranches,
-                          icon: const Icon(Icons.merge_type),
-                          label: const Text('Sync / Merge'),
-                        ),
-                        const SizedBox(width: 12),
-                        OutlinedButton.icon(
-                          onPressed: busy ? null : onEditBranches,
-                          icon: const Icon(Icons.tune),
-                          label: const Text('Select Branches'),
+                          message!,
+                          style: TextStyle(color: mutedTextColor(context)),
                         ),
                       ],
-                    ),
-                    const SizedBox(height: 22),
-                    if (branches.isEmpty)
-                      const EmptyState(text: 'No branches selected yet.')
-                    else
-                      Expanded(
-                        child: BranchGrid(
-                          repo: repo,
-                          branches: branches,
-                          currentBranch: currentBranch,
-                          checkoutBlocked: checkoutBlocked,
-                          busy: busy,
-                          cardSize: cardSize,
-                          syncAnimation: syncAnimation,
-                          onSwapBranches: onSwapBranches,
-                          onRefresh: onRefresh,
-                          onPull: onPull,
-                          onCheckout: onCheckout,
-                          onCommit: onCommit,
-                          onPush: onPush,
-                          onUndoCommit: onUndoCommit,
+                      if (operations.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          'Last operation: ${operations.first.operation} '
+                          '${operations.first.success ? 'succeeded' : 'failed'}',
+                          style: TextStyle(color: mutedTextColor(context)),
                         ),
-                      ),
-                    if (syncAnimation != null) ...[
-                      const SizedBox(height: 12),
-                      SyncMergeLegend(state: syncAnimation!),
+                      ],
+                      const SizedBox(height: 14),
+                      FooterCredit(onOpenGithubProfile: onOpenGithubProfile),
                     ],
-                    if (message != null) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        message!,
-                        style: TextStyle(color: mutedTextColor(context)),
-                      ),
-                    ],
-                    if (operations.isNotEmpty) ...[
-                      const SizedBox(height: 12),
-                      Text(
-                        'Last operation: ${operations.first.operation} '
-                        '${operations.first.success ? 'succeeded' : 'failed'}',
-                        style: TextStyle(color: mutedTextColor(context)),
-                      ),
-                    ],
-                    const SizedBox(height: 14),
-                    FooterCredit(onOpenGithubProfile: onOpenGithubProfile),
-                  ],
+                  ),
                 ),
               ),
             ),
             SizedBox(width: gap),
             SizedBox(
-              height: 720,
+              height: panelHeight,
               child: CurrentChangesPanel(
                 width: sidePanelWidth,
                 branchName: currentBranch,
@@ -1660,67 +1695,82 @@ class BranchCard extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          Row(
-            children: [
-              SizedBox.square(
-                dimension: actionButtonSize,
-                child: IconButton.filledTonal(
-                  tooltip: 'Pull',
-                  onPressed: busy || !isCurrentBranch ? null : onPull,
-                  iconSize: actionIconSize,
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.download),
-                ),
-              ),
-              SizedBox(width: actionGap),
-              SizedBox.square(
-                dimension: actionButtonSize,
-                child: IconButton.filledTonal(
-                  tooltip: 'Commit',
-                  onPressed: busy || !isCurrentBranch ? null : onCommit,
-                  iconSize: actionIconSize,
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.add_task),
-                ),
-              ),
-              SizedBox(width: actionGap),
-              SizedBox.square(
-                dimension: actionButtonSize,
-                child: IconButton.filledTonal(
-                  tooltip: 'Undo last commit',
-                  onPressed: busy || !isCurrentBranch ? null : onUndoCommit,
-                  iconSize: actionIconSize,
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.undo),
-                ),
-              ),
-              SizedBox(width: actionGap),
-              SizedBox.square(
-                dimension: actionButtonSize,
-                child: IconButton.filledTonal(
-                  tooltip: 'Push',
-                  onPressed: busy || !isCurrentBranch ? null : onPush,
-                  iconSize: actionIconSize,
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.upload),
-                ),
-              ),
-              const Spacer(),
-              SizedBox.square(
-                dimension: actionButtonSize,
-                child: IconButton.filled(
-                  tooltip: isCurrentBranch
-                      ? 'Already checked out'
-                      : checkoutBlocked
-                      ? 'Checkout with uncommitted changes'
-                      : 'Checkout branch',
-                  onPressed: busy || isCurrentBranch ? null : onCheckout,
-                  iconSize: actionIconSize,
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.login),
-                ),
-              ),
-            ],
+          LayoutBuilder(
+            builder: (context, actionConstraints) {
+              final compactGap = math.min(
+                actionGap,
+                math.max(2.0, actionConstraints.maxWidth / 70),
+              );
+              final maxButtonSize =
+                  (actionConstraints.maxWidth - (compactGap * 4)) / 5;
+              final buttonSize = math.min(
+                actionButtonSize,
+                math.max(18.0, maxButtonSize),
+              );
+              final iconSize = math.min(
+                actionIconSize,
+                math.max(12.0, buttonSize * 0.62),
+              );
+              Widget tonalAction({
+                required String tooltip,
+                required VoidCallback? onPressed,
+                required IconData icon,
+              }) {
+                return SizedBox.square(
+                  dimension: buttonSize,
+                  child: IconButton.filledTonal(
+                    tooltip: tooltip,
+                    onPressed: onPressed,
+                    iconSize: iconSize,
+                    padding: EdgeInsets.zero,
+                    icon: Icon(icon),
+                  ),
+                );
+              }
+
+              return Row(
+                children: [
+                  tonalAction(
+                    tooltip: 'Pull',
+                    onPressed: busy || !isCurrentBranch ? null : onPull,
+                    icon: Icons.download,
+                  ),
+                  SizedBox(width: compactGap),
+                  tonalAction(
+                    tooltip: 'Commit',
+                    onPressed: busy || !isCurrentBranch ? null : onCommit,
+                    icon: Icons.add_task,
+                  ),
+                  SizedBox(width: compactGap),
+                  tonalAction(
+                    tooltip: 'Undo last commit',
+                    onPressed: busy || !isCurrentBranch ? null : onUndoCommit,
+                    icon: Icons.undo,
+                  ),
+                  SizedBox(width: compactGap),
+                  tonalAction(
+                    tooltip: 'Push',
+                    onPressed: busy || !isCurrentBranch ? null : onPush,
+                    icon: Icons.upload,
+                  ),
+                  const Spacer(),
+                  SizedBox.square(
+                    dimension: buttonSize,
+                    child: IconButton.filled(
+                      tooltip: isCurrentBranch
+                          ? 'Already checked out'
+                          : checkoutBlocked
+                          ? 'Checkout with uncommitted changes'
+                          : 'Checkout branch',
+                      onPressed: busy || isCurrentBranch ? null : onCheckout,
+                      iconSize: iconSize,
+                      padding: EdgeInsets.zero,
+                      icon: const Icon(Icons.login),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
