@@ -133,8 +133,8 @@ void main() {
       );
       final syncResult = await git.syncMergeBranches(
         repoPath: repo.path,
-        targetBranch: 'develop',
-        sourceBranches: ['remote-only'],
+        targetBranch: 'remote-only',
+        sourceBranches: ['develop'],
       );
       await _runGit(['branch', '--set-upstream-to', 'origin/main'], repo.path);
       final syncPushResult = await git.pushSyncedBranches(
@@ -199,6 +199,73 @@ void main() {
       );
     },
   );
+
+  test('syncMergeBranches one way follows branch path order', () async {
+    final repoDir = await Directory(
+      '${tempDir.path}${Platform.pathSeparator}repo',
+    ).create();
+
+    await _runGit(['init', '-b', 'branch-a', '.'], repoDir.path);
+    await _runGit(['config', 'user.email', 'test@example.com'], repoDir.path);
+    await _runGit(['config', 'user.name', 'Test User'], repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}a.txt',
+    ).writeAsString('a');
+    await _runGit(['add', 'a.txt'], repoDir.path);
+    await _runGit(['commit', '-m', 'A branch'], repoDir.path);
+
+    await _runGit(['switch', '-c', 'branch-b'], repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}b.txt',
+    ).writeAsString('b');
+    await _runGit(['add', 'b.txt'], repoDir.path);
+    await _runGit(['commit', '-m', 'B branch'], repoDir.path);
+
+    await _runGit(['switch', 'branch-a'], repoDir.path);
+    await _runGit(['switch', '-c', 'branch-c'], repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}c.txt',
+    ).writeAsString('c');
+    await _runGit(['add', 'c.txt'], repoDir.path);
+    await _runGit(['commit', '-m', 'C branch'], repoDir.path);
+
+    await _runGit(['switch', 'branch-a'], repoDir.path);
+    final result = await git.syncMergeBranches(
+      repoPath: repoDir.path,
+      targetBranch: 'branch-a',
+      sourceBranches: ['branch-b', 'branch-c'],
+    );
+
+    expect(result.success, isTrue, reason: result.summary);
+    await _runGit(['switch', 'branch-a'], repoDir.path);
+    expect(
+      await File('${repoDir.path}${Platform.pathSeparator}b.txt').exists(),
+      isFalse,
+      reason: 'branch-a is the source and should not receive branch-b',
+    );
+    await _runGit(['switch', 'branch-b'], repoDir.path);
+    expect(
+      await File('${repoDir.path}${Platform.pathSeparator}a.txt').exists(),
+      isTrue,
+      reason: 'branch-b should receive branch-a',
+    );
+    expect(
+      await File('${repoDir.path}${Platform.pathSeparator}c.txt').exists(),
+      isFalse,
+      reason: 'branch-b should not receive branch-c in one-way sync',
+    );
+    await _runGit(['switch', 'branch-c'], repoDir.path);
+    expect(
+      await File('${repoDir.path}${Platform.pathSeparator}a.txt').exists(),
+      isTrue,
+      reason: 'branch-c should receive branch-a through branch-b',
+    );
+    expect(
+      await File('${repoDir.path}${Platform.pathSeparator}b.txt').exists(),
+      isTrue,
+      reason: 'branch-c should receive branch-b',
+    );
+  });
 
   test(
     'syncMergeBranches can sync selected branches both directions',

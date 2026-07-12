@@ -10,6 +10,8 @@ import 'git_service.dart';
 import 'models.dart';
 import 'update_service.dart';
 
+final appThemeMode = ValueNotifier<ThemeMode>(ThemeMode.light);
+
 void main() {
   runApp(const GitWorkflowApp());
 }
@@ -19,18 +21,32 @@ class GitWorkflowApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Git Workflow',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF5865F2),
-          brightness: Brightness.light,
-        ),
-        scaffoldBackgroundColor: const Color(0xFFF7F9FD),
-        useMaterial3: true,
-      ),
-      home: const GitWorkflowHome(),
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: appThemeMode,
+      builder: (context, mode, child) {
+        return MaterialApp(
+          debugShowCheckedModeBanner: false,
+          title: 'Git Workflow',
+          themeMode: mode,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF5865F2),
+              brightness: Brightness.light,
+            ),
+            scaffoldBackgroundColor: const Color(0xFFF7F9FD),
+            useMaterial3: true,
+          ),
+          darkTheme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFF8B8DFF),
+              brightness: Brightness.dark,
+            ),
+            scaffoldBackgroundColor: const Color(0xFF0F172A),
+            useMaterial3: true,
+          ),
+          home: const GitWorkflowHome(),
+        );
+      },
     );
   }
 }
@@ -52,12 +68,15 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   var _branches = <TrackedBranch>[];
   var _operations = <GitOperationResult>[];
   final _currentBranches = <String, String>{};
+  final _commitHistory = <String, List<CommitHistoryEntry>>{};
+  final _currentChangedFiles = <String, List<String>>{};
   RepositoryInfo? _selectedRepo;
   var _loading = true;
   var _busy = false;
   var _autoRefreshing = false;
   var _cardSize = 360.0;
   var _autoCheckUpdates = true;
+  var _darkMode = false;
   var _checkingUpdates = false;
   String? _message;
   String? _updateError;
@@ -89,9 +108,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       _branches = snapshot.branches;
       _operations = snapshot.operations;
       _autoCheckUpdates = snapshot.autoCheckUpdates;
+      _darkMode = snapshot.darkMode;
       _selectedRepo = _repositories.firstOrNull;
       _loading = false;
     });
+    appThemeMode.value = snapshot.darkMode ? ThemeMode.dark : ThemeMode.light;
     unawaited(_loadCurrentBranches());
     if (snapshot.autoCheckUpdates) {
       unawaited(_checkForUpdates(silent: true));
@@ -109,7 +130,115 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     if (mounted) {
       setState(() => _currentBranches[repo.id] = branch);
     }
+    unawaited(_refreshCurrentBranchHistory(repo, branch));
+    unawaited(_refreshCurrentChangedFiles(repo, branch));
     return branch;
+  }
+
+  Future<void> _refreshCurrentBranchHistory(
+    RepositoryInfo repo,
+    String branch,
+  ) async {
+    if (branch.trim().isEmpty) return;
+    final history = await _git.commitHistory(
+      repoPath: repo.path,
+      branchName: branch,
+    );
+    if (!mounted) return;
+    final latestBranch = _currentBranches[repo.id];
+    if (latestBranch != branch) return;
+    setState(() => _commitHistory[repo.id] = history);
+  }
+
+  Future<void> _refreshCurrentChangedFiles(
+    RepositoryInfo repo,
+    String branch,
+  ) async {
+    if (branch.trim().isEmpty) return;
+    final files = await _git.changedFiles(repo.path);
+    if (!mounted) return;
+    final latestBranch = _currentBranches[repo.id];
+    if (latestBranch != branch) return;
+    setState(() => _currentChangedFiles[repo.id] = files);
+  }
+
+  Future<void> _showCurrentFileDiff(
+    RepositoryInfo repo,
+    String filePath,
+  ) async {
+    try {
+      final diff = await _git.diffForFile(repo.path, filePath);
+      if (!mounted) return;
+      await showDialog<void>(
+        context: context,
+        builder: (_) => DiffDialog(filePath: filePath, diff: diff),
+      );
+    } catch (error) {
+      if (mounted) {
+        setState(() => _message = error.toString());
+      }
+    }
+  }
+
+  Future<void> _commitCurrentFiles(
+    RepositoryInfo repo,
+    List<String> files,
+    String message,
+    String description,
+  ) async {
+    await _guarded(() async {
+      final currentBranch = await _refreshCurrentBranch(repo);
+      final result = await _git.commitBranch(
+        worktreePath: repo.path,
+        branchName: currentBranch,
+        message: message,
+        description: description,
+        files: files,
+      );
+      await _recordOperation(result);
+      await _refreshCurrentBranch(repo);
+      await _refreshTrackedBranches(repo);
+    });
+  }
+
+  Future<void> _discardCurrentFiles(
+    RepositoryInfo repo,
+    List<String> files,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Discard changes?'),
+        content: Text(
+          files.length == 1
+              ? 'Discard changes in ${files.first}? This cannot be undone.'
+              : 'Discard changes in ${files.length} selected files? This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Discard'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    await _guarded(() async {
+      final currentBranch = await _refreshCurrentBranch(repo);
+      final result = await _git.discardFiles(
+        worktreePath: repo.path,
+        branchName: currentBranch,
+        files: files,
+      );
+      await _recordOperation(result);
+      await _refreshCurrentBranch(repo);
+      await _refreshTrackedBranches(repo);
+    });
   }
 
   Future<void> _save() async {
@@ -119,8 +248,15 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         branches: _branches,
         operations: _operations.take(25).toList(),
         autoCheckUpdates: _autoCheckUpdates,
+        darkMode: _darkMode,
       ),
     );
+  }
+
+  Future<void> _setDarkMode(bool value) async {
+    setState(() => _darkMode = value);
+    appThemeMode.value = value ? ThemeMode.dark : ThemeMode.light;
+    await _save();
   }
 
   Future<void> _setAutoCheckUpdates(bool value) async {
@@ -164,6 +300,118 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   Future<void> _openReleasePage() async {
     final url = _latestRelease?.url;
     if (url == null || url.isEmpty) return;
+    await _openUrl(url);
+  }
+
+  Future<void> _downloadAndInstallUpdate() async {
+    var release = _latestRelease;
+    if (release == null) {
+      await _checkForUpdates();
+      release = _latestRelease;
+    }
+    if (release == null) return;
+
+    if (!release.isNewerThanCurrent) {
+      setState(() => _message = 'You are running the latest version.');
+      return;
+    }
+
+    final asset = release.preferredAsset;
+    if (asset == null) {
+      setState(() {
+        _message =
+            'Update available, but no Windows installer/build asset was found.';
+      });
+      await _openReleasePage();
+      return;
+    }
+
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => UpdateInstallDialog(
+        release: release!,
+        asset: asset,
+        updateService: _updates,
+        onOpenFile: _openDownloadedUpdate,
+      ),
+    );
+  }
+
+  Future<void> _openDownloadedUpdate(FileSystemEntity file) async {
+    if (file.path.toLowerCase().endsWith('.zip')) {
+      final targetDir = Directory(
+        file.path.replaceFirst(RegExp(r'\.zip$', caseSensitive: false), ''),
+      );
+      if (await targetDir.exists()) {
+        await targetDir.delete(recursive: true);
+      }
+      await targetDir.create(recursive: true);
+
+      if (Platform.isWindows) {
+        final expand = await Process.run('powershell', [
+          '-NoProfile',
+          '-Command',
+          'Expand-Archive -LiteralPath ${_psQuote(file.path)} -DestinationPath ${_psQuote(targetDir.path)} -Force',
+        ]);
+        if (expand.exitCode != 0) {
+          throw 'Unable to extract update: ${expand.stderr}';
+        }
+      } else {
+        final unzip = await Process.run('unzip', [
+          '-o',
+          file.path,
+          '-d',
+          targetDir.path,
+        ]);
+        if (unzip.exitCode != 0) {
+          throw 'Unable to extract update: ${unzip.stderr}';
+        }
+      }
+
+      final exe = File(
+        '${targetDir.path}${Platform.pathSeparator}automation_git_workflow.exe',
+      );
+      if (await exe.exists()) {
+        await _openDownloadedUpdate(exe);
+        return;
+      }
+      await _openDownloadedUpdate(targetDir);
+      return;
+    }
+
+    if (await FileSystemEntity.isDirectory(file.path)) {
+      if (Platform.isWindows) {
+        await Process.start('explorer', [file.path]);
+        return;
+      }
+      if (Platform.isMacOS) {
+        await Process.start('open', [file.path]);
+        return;
+      }
+      await Process.start('xdg-open', [file.path]);
+      return;
+    }
+
+    if (Platform.isWindows) {
+      await Process.start(file.path, [], mode: ProcessStartMode.detached);
+      return;
+    }
+    if (Platform.isMacOS) {
+      await Process.start('open', [file.path]);
+      return;
+    }
+    await Process.start('xdg-open', [file.path]);
+  }
+
+  String _psQuote(String value) => "'${value.replaceAll("'", "''")}'";
+
+  Future<void> _openGithubProfile() async {
+    await _openUrl('https://github.com/asifkhalid03');
+  }
+
+  Future<void> _openUrl(String url) async {
     if (Platform.isWindows) {
       await Process.start('rundll32', ['url.dll,FileProtocolHandler', url]);
       return;
@@ -436,6 +684,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         worktreePath: repo.path,
         branchName: branch.branchName,
         message: request.message,
+        description: request.description,
         files: request.files,
       );
       await _recordOperation(result);
@@ -501,12 +750,30 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           worktreePath: repo.path,
           branchName: activeBranch,
           message: commitRequest.message,
+          description: commitRequest.description,
           files: commitRequest.files,
         );
         await _recordOperation(commitResult);
         await _refreshTrackedBranches(repo);
         if (!commitResult.success) return;
       }
+
+      setState(() {
+        _message = 'Refreshing and pulling current branch: $activeBranch';
+      });
+      final pullResult = await _git.pullBranch(repo.path, activeUpstream);
+      await _recordOperation(pullResult);
+      if (!pullResult.success) {
+        await _refreshCurrentBranch(repo);
+        await _refreshTrackedBranches(repo);
+        setState(() {
+          _message =
+              'Sync cancelled: pull failed on current branch $activeBranch.';
+        });
+        return;
+      }
+      await _refreshCurrentBranch(repo);
+      await _refreshTrackedBranches(repo);
 
       if (!mounted) return;
       setState(() {
@@ -781,7 +1048,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           children: [
             Center(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 1160),
+                constraints: const BoxConstraints(maxWidth: 1680),
                 child: Padding(
                   padding: const EdgeInsets.all(32),
                   child: selectedRepo == null
@@ -798,6 +1065,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                       : RepositoryDashboard(
                           repo: selectedRepo,
                           currentBranch: currentBranch,
+                          currentBranchHistory:
+                              _commitHistory[selectedRepo.id] ?? const [],
+                          currentChangedFiles:
+                              _currentChangedFiles[selectedRepo.id] ?? const [],
                           repositories: _repositories,
                           branches: selectedBranches,
                           operations: _operations,
@@ -806,18 +1077,24 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           latestRelease: _latestRelease,
                           checkingUpdates: _checkingUpdates,
                           autoCheckUpdates: _autoCheckUpdates,
+                          darkMode: _darkMode,
                           updateError: _updateError,
                           syncAnimation: _syncAnimation,
                           checkoutBlocked: checkoutBlocked,
                           cardSize: _cardSize,
                           onChooseFolder: _chooseRepository,
-                          onChangeRepo: (repo) =>
-                              setState(() => _selectedRepo = repo),
+                          onChangeRepo: (repo) {
+                            setState(() => _selectedRepo = repo);
+                            unawaited(_refreshCurrentBranch(repo));
+                          },
                           onCardSizeChanged: (value) =>
                               setState(() => _cardSize = value),
                           onCheckUpdates: _checkForUpdates,
                           onOpenRelease: _openReleasePage,
+                          onInstallUpdate: _downloadAndInstallUpdate,
+                          onOpenGithubProfile: _openGithubProfile,
                           onAutoCheckUpdatesChanged: _setAutoCheckUpdates,
+                          onDarkModeChanged: _setDarkMode,
                           onEditBranches: () => _selectBranches(selectedRepo),
                           onRefresh: _refreshBranch,
                           onPull: _pullBranch,
@@ -825,6 +1102,17 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           onCommit: _commitBranch,
                           onPush: _pushBranch,
                           onUndoCommit: _undoLastCommit,
+                          onShowFileDiff: (file) =>
+                              _showCurrentFileDiff(selectedRepo, file),
+                          onCommitFiles: (files, message, description) =>
+                              _commitCurrentFiles(
+                                selectedRepo,
+                                files,
+                                message,
+                                description,
+                              ),
+                          onDiscardFiles: (files) =>
+                              _discardCurrentFiles(selectedRepo, files),
                           onSwapBranches: (from, to) =>
                               _swapTrackedBranches(selectedRepo, from, to),
                           onSyncBranches: () => _syncBranches(
@@ -950,6 +1238,8 @@ class RepositoryDashboard extends StatelessWidget {
   const RepositoryDashboard({
     required this.repo,
     required this.currentBranch,
+    required this.currentBranchHistory,
+    required this.currentChangedFiles,
     required this.repositories,
     required this.branches,
     required this.operations,
@@ -958,6 +1248,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.latestRelease,
     required this.checkingUpdates,
     required this.autoCheckUpdates,
+    required this.darkMode,
     required this.updateError,
     required this.syncAnimation,
     required this.checkoutBlocked,
@@ -967,7 +1258,10 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onCardSizeChanged,
     required this.onCheckUpdates,
     required this.onOpenRelease,
+    required this.onInstallUpdate,
+    required this.onOpenGithubProfile,
     required this.onAutoCheckUpdatesChanged,
+    required this.onDarkModeChanged,
     required this.onEditBranches,
     required this.onRefresh,
     required this.onPull,
@@ -975,6 +1269,9 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onCommit,
     required this.onPush,
     required this.onUndoCommit,
+    required this.onShowFileDiff,
+    required this.onCommitFiles,
+    required this.onDiscardFiles,
     required this.onSwapBranches,
     required this.onSyncBranches,
     super.key,
@@ -982,6 +1279,8 @@ class RepositoryDashboard extends StatelessWidget {
 
   final RepositoryInfo repo;
   final String currentBranch;
+  final List<CommitHistoryEntry> currentBranchHistory;
+  final List<String> currentChangedFiles;
   final List<RepositoryInfo> repositories;
   final List<TrackedBranch> branches;
   final List<GitOperationResult> operations;
@@ -990,6 +1289,7 @@ class RepositoryDashboard extends StatelessWidget {
   final ReleaseInfo? latestRelease;
   final bool checkingUpdates;
   final bool autoCheckUpdates;
+  final bool darkMode;
   final String? updateError;
   final SyncAnimationState? syncAnimation;
   final bool checkoutBlocked;
@@ -999,7 +1299,10 @@ class RepositoryDashboard extends StatelessWidget {
   final ValueChanged<double> onCardSizeChanged;
   final VoidCallback onCheckUpdates;
   final VoidCallback onOpenRelease;
+  final VoidCallback onInstallUpdate;
+  final VoidCallback onOpenGithubProfile;
   final ValueChanged<bool> onAutoCheckUpdatesChanged;
+  final ValueChanged<bool> onDarkModeChanged;
   final VoidCallback onEditBranches;
   final ValueChanged<TrackedBranch> onRefresh;
   final ValueChanged<TrackedBranch> onPull;
@@ -1007,135 +1310,234 @@ class RepositoryDashboard extends StatelessWidget {
   final ValueChanged<TrackedBranch> onCommit;
   final ValueChanged<TrackedBranch> onPush;
   final ValueChanged<TrackedBranch> onUndoCommit;
+  final ValueChanged<String> onShowFileDiff;
+  final void Function(List<String> files, String message, String description)
+  onCommitFiles;
+  final ValueChanged<List<String>> onDiscardFiles;
   final void Function(TrackedBranch from, TrackedBranch to) onSwapBranches;
   final VoidCallback onSyncBranches;
 
   @override
   Widget build(BuildContext context) {
-    return AppPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.folder_outlined,
-                size: 42,
-                color: Color(0xFF5865F2),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final sidePanelWidth = constraints.maxWidth < 1200
+            ? 200.0
+            : constraints.maxWidth < 1450
+            ? 230.0
+            : 292.0;
+        final gap = constraints.maxWidth < 1450 ? 12.0 : 22.0;
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              height: 720,
+              child: CurrentBranchHistoryPanel(
+                width: sidePanelWidth,
+                branchName: currentBranch,
+                commits: currentBranchHistory,
               ),
-              const SizedBox(width: 24),
-              Expanded(
+            ),
+            SizedBox(width: gap),
+            Expanded(
+              child: AppPanel(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      repo.name,
-                      style: Theme.of(context).textTheme.headlineSmall,
+                    Row(
+                      children: [
+                        const Icon(
+                          Icons.folder_outlined,
+                          size: 42,
+                          color: Color(0xFF5865F2),
+                        ),
+                        const SizedBox(width: 24),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                repo.name,
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(
+                                  context,
+                                ).textTheme.headlineSmall,
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                repo.path,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: mutedTextColor(context),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              CurrentBranchInline(branchName: currentBranch),
+                            ],
+                          ),
+                        ),
+                        DropdownButton<RepositoryInfo>(
+                          value: repo,
+                          items: repositories
+                              .map(
+                                (item) => DropdownMenuItem(
+                                  value: item,
+                                  child: Text(item.name),
+                                ),
+                              )
+                              .toList(),
+                          onChanged: (value) {
+                            if (value != null) onChangeRepo(value);
+                          },
+                        ),
+                        const SizedBox(width: 12),
+                        Tooltip(
+                          message: darkMode
+                              ? 'Switch to light mode'
+                              : 'Switch to dark mode',
+                          child: Switch(
+                            value: darkMode,
+                            onChanged: busy ? null : onDarkModeChanged,
+                          ),
+                        ),
+                        Icon(
+                          darkMode ? Icons.dark_mode : Icons.light_mode,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : onChooseFolder,
+                          icon: const Icon(Icons.add),
+                          label: const Text('Add Repo'),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 8),
-                    Text(
-                      repo.path,
-                      style: const TextStyle(color: Color(0xFF647086)),
+                    const SizedBox(height: 18),
+                    UpdateStatusPanel(
+                      latestRelease: latestRelease,
+                      checking: checkingUpdates,
+                      autoCheck: autoCheckUpdates,
+                      error: updateError,
+                      onCheck: onCheckUpdates,
+                      onOpenRelease: onOpenRelease,
+                      onInstallUpdate: onInstallUpdate,
+                      onAutoCheckChanged: onAutoCheckUpdatesChanged,
                     ),
-                    const SizedBox(height: 8),
-                    CurrentBranchInline(branchName: currentBranch),
+                    const Divider(height: 42),
+                    Row(
+                      children: [
+                        Text(
+                          'Branches',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                        const Spacer(),
+                        BranchCardSizeSlider(
+                          value: cardSize,
+                          onChanged: busy ? null : onCardSizeChanged,
+                        ),
+                        const SizedBox(width: 16),
+                        OutlinedButton.icon(
+                          onPressed: busy || branches.length < 2
+                              ? null
+                              : onSyncBranches,
+                          icon: const Icon(Icons.merge_type),
+                          label: const Text('Sync / Merge'),
+                        ),
+                        const SizedBox(width: 12),
+                        OutlinedButton.icon(
+                          onPressed: busy ? null : onEditBranches,
+                          icon: const Icon(Icons.tune),
+                          label: const Text('Select Branches'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 22),
+                    if (branches.isEmpty)
+                      const EmptyState(text: 'No branches selected yet.')
+                    else
+                      Expanded(
+                        child: BranchGrid(
+                          repo: repo,
+                          branches: branches,
+                          currentBranch: currentBranch,
+                          checkoutBlocked: checkoutBlocked,
+                          busy: busy,
+                          cardSize: cardSize,
+                          syncAnimation: syncAnimation,
+                          onSwapBranches: onSwapBranches,
+                          onRefresh: onRefresh,
+                          onPull: onPull,
+                          onCheckout: onCheckout,
+                          onCommit: onCommit,
+                          onPush: onPush,
+                          onUndoCommit: onUndoCommit,
+                        ),
+                      ),
+                    if (syncAnimation != null) ...[
+                      const SizedBox(height: 12),
+                      SyncMergeLegend(state: syncAnimation!),
+                    ],
+                    if (message != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        message!,
+                        style: TextStyle(color: mutedTextColor(context)),
+                      ),
+                    ],
+                    if (operations.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Last operation: ${operations.first.operation} '
+                        '${operations.first.success ? 'succeeded' : 'failed'}',
+                        style: TextStyle(color: mutedTextColor(context)),
+                      ),
+                    ],
+                    const SizedBox(height: 14),
+                    FooterCredit(onOpenGithubProfile: onOpenGithubProfile),
                   ],
                 ),
               ),
-              DropdownButton<RepositoryInfo>(
-                value: repo,
-                items: repositories
-                    .map(
-                      (item) =>
-                          DropdownMenuItem(value: item, child: Text(item.name)),
-                    )
-                    .toList(),
-                onChanged: (value) {
-                  if (value != null) onChangeRepo(value);
-                },
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                onPressed: busy ? null : onChooseFolder,
-                icon: const Icon(Icons.add),
-                label: const Text('Add Repo'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 18),
-          UpdateStatusPanel(
-            latestRelease: latestRelease,
-            checking: checkingUpdates,
-            autoCheck: autoCheckUpdates,
-            error: updateError,
-            onCheck: onCheckUpdates,
-            onOpenRelease: onOpenRelease,
-            onAutoCheckChanged: onAutoCheckUpdatesChanged,
-          ),
-          const Divider(height: 42),
-          Row(
-            children: [
-              Text('Branches', style: Theme.of(context).textTheme.titleLarge),
-              const Spacer(),
-              BranchCardSizeSlider(
-                value: cardSize,
-                onChanged: busy ? null : onCardSizeChanged,
-              ),
-              const SizedBox(width: 16),
-              OutlinedButton.icon(
-                onPressed: busy || branches.length < 2 ? null : onSyncBranches,
-                icon: const Icon(Icons.merge_type),
-                label: const Text('Sync / Merge'),
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                onPressed: busy ? null : onEditBranches,
-                icon: const Icon(Icons.tune),
-                label: const Text('Select Branches'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
-          if (branches.isEmpty)
-            const EmptyState(text: 'No branches selected yet.')
-          else
-            BranchGrid(
-              repo: repo,
-              branches: branches,
-              currentBranch: currentBranch,
-              checkoutBlocked: checkoutBlocked,
-              busy: busy,
-              cardSize: cardSize,
-              syncAnimation: syncAnimation,
-              onSwapBranches: onSwapBranches,
-              onRefresh: onRefresh,
-              onPull: onPull,
-              onCheckout: onCheckout,
-              onCommit: onCommit,
-              onPush: onPush,
-              onUndoCommit: onUndoCommit,
             ),
-          if (syncAnimation != null) ...[
-            const SizedBox(height: 12),
-            SyncMergeLegend(state: syncAnimation!),
-          ],
-          if (message != null) ...[
-            const SizedBox(height: 12),
-            Text(message!, style: const TextStyle(color: Color(0xFF647086))),
-          ],
-          if (operations.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(
-              'Last operation: ${operations.first.operation} '
-              '${operations.first.success ? 'succeeded' : 'failed'}',
-              style: const TextStyle(color: Color(0xFF647086)),
+            SizedBox(width: gap),
+            SizedBox(
+              height: 720,
+              child: CurrentChangesPanel(
+                width: sidePanelWidth,
+                branchName: currentBranch,
+                files: currentChangedFiles,
+                busy: busy,
+                onOpenDiff: onShowFileDiff,
+                onCommitFiles: onCommitFiles,
+                onDiscardFiles: onDiscardFiles,
+              ),
             ),
           ],
-        ],
-      ),
+        );
+      },
     );
   }
 }
+
+bool isDarkMode(BuildContext context) =>
+    Theme.of(context).brightness == Brightness.dark;
+
+Color surfaceColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFF111827) : Colors.white;
+
+Color elevatedSurfaceColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFF182235) : Colors.white;
+
+Color borderColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFF334155) : const Color(0xFFE0E5EE);
+
+Color primaryTextColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFFF8FAFC) : const Color(0xFF1F2937);
+
+Color mutedTextColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFFCBD5E1) : const Color(0xFF647086);
+
+Color softTextColor(BuildContext context) =>
+    isDarkMode(context) ? const Color(0xFF94A3B8) : const Color(0xFF8A94A6);
 
 class BranchCard extends StatelessWidget {
   const BranchCard({
@@ -1143,6 +1545,7 @@ class BranchCard extends StatelessWidget {
     required this.isCurrentBranch,
     required this.checkoutBlocked,
     required this.busy,
+    required this.scale,
     required this.onRefresh,
     required this.onPull,
     required this.onCheckout,
@@ -1156,6 +1559,7 @@ class BranchCard extends StatelessWidget {
   final bool isCurrentBranch;
   final bool checkoutBlocked;
   final bool busy;
+  final double scale;
   final VoidCallback onRefresh;
   final VoidCallback onPull;
   final VoidCallback onCheckout;
@@ -1166,63 +1570,90 @@ class BranchCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final status = branch.lastStatus;
+    final titleSize = 22.0 * scale;
+    final bodySize = 16.0 * scale;
+    final metaSize = 14.0 * scale;
+    final padding = 24.0 * scale;
+    final iconSize = 24.0 * scale;
+    final actionIconSize = 24.0 * scale;
+    final actionButtonSize = 40.0 * scale;
+    final actionGap = 8.0 * scale;
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xFFE0E5EE)),
+        color: surfaceColor(context),
+        border: Border.all(color: borderColor(context)),
         borderRadius: BorderRadius.circular(8),
       ),
-      padding: const EdgeInsets.all(24),
+      padding: EdgeInsets.all(padding),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.account_tree_outlined, color: Color(0xFF6D5DF2)),
-              const SizedBox(width: 16),
+              Icon(
+                Icons.account_tree_outlined,
+                color: const Color(0xFF6D5DF2),
+                size: iconSize,
+              ),
+              SizedBox(width: 16 * scale),
               Expanded(
                 child: Text(
                   branch.branchName,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleLarge,
+                  style: TextStyle(
+                    color: primaryTextColor(context),
+                    fontSize: titleSize,
+                    fontWeight: FontWeight.w500,
+                  ),
                 ),
               ),
               if (isCurrentBranch) ...[
-                const SizedBox(width: 8),
-                const CurrentBranchBadge(),
+                SizedBox(width: 8 * scale),
+                CurrentBranchBadge(scale: scale),
               ],
               IconButton(
                 tooltip: 'Refresh',
                 onPressed: busy ? null : onRefresh,
+                iconSize: actionIconSize,
                 icon: const Icon(Icons.refresh),
               ),
             ],
           ),
-          const SizedBox(height: 18),
-          StatusBadge(status: status),
-          const SizedBox(height: 20),
+          SizedBox(height: 18 * scale),
+          StatusBadge(status: status, scale: scale),
+          SizedBox(height: 20 * scale),
           Text(
             'Last pull: ${formatRelative(branch.lastPullAt)}',
-            style: const TextStyle(fontSize: 16, color: Color(0xFF445064)),
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: bodySize,
+              color: mutedTextColor(context),
+            ),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8 * scale),
           Text(
             'Checked: ${formatRelative(status?.lastCheckedAt)}',
-            style: const TextStyle(color: Color(0xFF8A94A6)),
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: metaSize, color: softTextColor(context)),
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: 8 * scale),
           Text(
             'Commit: ${formatCommit(status)}',
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(color: Color(0xFF647086)),
+            style: TextStyle(
+              fontSize: metaSize,
+              color: mutedTextColor(context),
+            ),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: 6 * scale),
           Text(
             '${status?.changedFilesCount ?? 0} uncommitted ${status?.changedFilesCount == 1 ? 'change' : 'changes'}',
+            overflow: TextOverflow.ellipsis,
             style: TextStyle(
+              fontSize: metaSize,
               color: (status?.hasLocalChanges ?? false)
                   ? const Color(0xFFDD8500)
-                  : const Color(0xFF647086),
+                  : mutedTextColor(context),
               fontWeight: (status?.hasLocalChanges ?? false)
                   ? FontWeight.w700
                   : FontWeight.w400,
@@ -1231,38 +1662,63 @@ class BranchCard extends StatelessWidget {
           const Spacer(),
           Row(
             children: [
-              IconButton.filledTonal(
-                tooltip: 'Pull',
-                onPressed: busy || !isCurrentBranch ? null : onPull,
-                icon: const Icon(Icons.download),
+              SizedBox.square(
+                dimension: actionButtonSize,
+                child: IconButton.filledTonal(
+                  tooltip: 'Pull',
+                  onPressed: busy || !isCurrentBranch ? null : onPull,
+                  iconSize: actionIconSize,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.download),
+                ),
               ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                tooltip: 'Commit',
-                onPressed: busy || !isCurrentBranch ? null : onCommit,
-                icon: const Icon(Icons.add_task),
+              SizedBox(width: actionGap),
+              SizedBox.square(
+                dimension: actionButtonSize,
+                child: IconButton.filledTonal(
+                  tooltip: 'Commit',
+                  onPressed: busy || !isCurrentBranch ? null : onCommit,
+                  iconSize: actionIconSize,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.add_task),
+                ),
               ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                tooltip: 'Undo last commit',
-                onPressed: busy || !isCurrentBranch ? null : onUndoCommit,
-                icon: const Icon(Icons.undo),
+              SizedBox(width: actionGap),
+              SizedBox.square(
+                dimension: actionButtonSize,
+                child: IconButton.filledTonal(
+                  tooltip: 'Undo last commit',
+                  onPressed: busy || !isCurrentBranch ? null : onUndoCommit,
+                  iconSize: actionIconSize,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.undo),
+                ),
               ),
-              const SizedBox(width: 8),
-              IconButton.filledTonal(
-                tooltip: 'Push',
-                onPressed: busy || !isCurrentBranch ? null : onPush,
-                icon: const Icon(Icons.upload),
+              SizedBox(width: actionGap),
+              SizedBox.square(
+                dimension: actionButtonSize,
+                child: IconButton.filledTonal(
+                  tooltip: 'Push',
+                  onPressed: busy || !isCurrentBranch ? null : onPush,
+                  iconSize: actionIconSize,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.upload),
+                ),
               ),
               const Spacer(),
-              IconButton.filled(
-                tooltip: isCurrentBranch
-                    ? 'Already checked out'
-                    : checkoutBlocked
-                    ? 'Checkout with uncommitted changes'
-                    : 'Checkout branch',
-                onPressed: busy || isCurrentBranch ? null : onCheckout,
-                icon: const Icon(Icons.login),
+              SizedBox.square(
+                dimension: actionButtonSize,
+                child: IconButton.filled(
+                  tooltip: isCurrentBranch
+                      ? 'Already checked out'
+                      : checkoutBlocked
+                      ? 'Checkout with uncommitted changes'
+                      : 'Checkout branch',
+                  onPressed: busy || isCurrentBranch ? null : onCheckout,
+                  iconSize: actionIconSize,
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.login),
+                ),
               ),
             ],
           ),
@@ -1270,6 +1726,814 @@ class BranchCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class CurrentBranchHistoryPanel extends StatelessWidget {
+  const CurrentBranchHistoryPanel({
+    required this.width,
+    required this.branchName,
+    required this.commits,
+    super.key,
+  });
+
+  final double width;
+  final String branchName;
+  final List<CommitHistoryEntry> commits;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: width,
+      decoration: BoxDecoration(
+        color: surfaceColor(context),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor(context)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0F0B1B3B),
+            blurRadius: 20,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Row(
+              children: [
+                const Icon(Icons.history, color: Color(0xFF5865F2), size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Current branch history',
+                        style: TextStyle(
+                          color: primaryTextColor(context),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        branchName.isEmpty ? 'No branch selected' : branchName,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: mutedTextColor(context),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: borderColor(context)),
+          Expanded(
+            child: commits.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Text(
+                        'No commits found for the current branch.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: mutedTextColor(context)),
+                      ),
+                    ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+                    itemCount: commits.length,
+                    itemBuilder: (context, index) {
+                      return CommitHistoryTile(
+                        commit: commits[index],
+                        isLatest: index == 0,
+                        isLast: index == commits.length - 1,
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CommitHistoryTile extends StatelessWidget {
+  const CommitHistoryTile({
+    required this.commit,
+    required this.isLatest,
+    required this.isLast,
+    super.key,
+  });
+
+  final CommitHistoryEntry commit;
+  final bool isLatest;
+  final bool isLast;
+
+  @override
+  Widget build(BuildContext context) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 18,
+            child: Column(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: isLatest
+                        ? const Color(0xFFF59E0B)
+                        : const Color(0xFF60A5FA),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: surfaceColor(context),
+                      width: 1.5,
+                    ),
+                  ),
+                ),
+                if (!isLast)
+                  const Expanded(
+                    child: VerticalDivider(
+                      color: Color(0xFF93C5FD),
+                      width: 1,
+                      thickness: 1,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          commit.message.isEmpty
+                              ? '(no commit message)'
+                              : commit.message,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: primaryTextColor(context),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        commit.shortHash,
+                        style: TextStyle(
+                          color: softTextColor(context),
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${commit.author} · ${commit.relativeTime}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: mutedTextColor(context),
+                      fontSize: 10,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class CurrentChangesPanel extends StatefulWidget {
+  const CurrentChangesPanel({
+    required this.width,
+    required this.branchName,
+    required this.files,
+    required this.busy,
+    required this.onOpenDiff,
+    required this.onCommitFiles,
+    required this.onDiscardFiles,
+    super.key,
+  });
+
+  final double width;
+  final String branchName;
+  final List<String> files;
+  final bool busy;
+  final ValueChanged<String> onOpenDiff;
+  final void Function(List<String> files, String message, String description)
+  onCommitFiles;
+  final ValueChanged<List<String>> onDiscardFiles;
+
+  @override
+  State<CurrentChangesPanel> createState() => _CurrentChangesPanelState();
+}
+
+class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
+  final _filterController = TextEditingController();
+  final _messageController = TextEditingController();
+  final _descriptionController = TextEditingController();
+  var _selectedFiles = <String>{};
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedFiles = {...widget.files};
+  }
+
+  @override
+  void didUpdateWidget(covariant CurrentChangesPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final currentFiles = widget.files.toSet();
+    _selectedFiles = _selectedFiles
+        .where((file) => currentFiles.contains(file))
+        .toSet();
+    if (oldWidget.files.length != widget.files.length &&
+        _selectedFiles.isEmpty) {
+      _selectedFiles = {...widget.files};
+    }
+  }
+
+  @override
+  void dispose() {
+    _filterController.dispose();
+    _messageController.dispose();
+    _descriptionController.dispose();
+    super.dispose();
+  }
+
+  void _toggleAll(bool checked, List<String> visibleFiles) {
+    setState(() {
+      if (checked) {
+        _selectedFiles.addAll(visibleFiles);
+      } else {
+        _selectedFiles.removeAll(visibleFiles);
+      }
+    });
+  }
+
+  void _toggleFile(String file, bool checked) {
+    setState(() {
+      if (checked) {
+        _selectedFiles.add(file);
+      } else {
+        _selectedFiles.remove(file);
+      }
+    });
+  }
+
+  void _commitSelected() {
+    widget.onCommitFiles(
+      _selectedFiles.toList(),
+      _messageController.text,
+      _descriptionController.text,
+    );
+  }
+
+  void _discardSelected() {
+    widget.onDiscardFiles(_selectedFiles.toList());
+  }
+
+  void _discardAll() {
+    widget.onDiscardFiles(widget.files);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filter = _filterController.text.trim().toLowerCase();
+    final visibleFiles = filter.isEmpty
+        ? widget.files
+        : widget.files
+              .where((file) => file.toLowerCase().contains(filter))
+              .toList();
+    final selectedCount = _selectedFiles.length;
+    final allVisibleSelected =
+        visibleFiles.isNotEmpty &&
+        visibleFiles.every((file) => _selectedFiles.contains(file));
+    final canCommit =
+        !widget.busy &&
+        selectedCount > 0 &&
+        _messageController.text.trim().isNotEmpty;
+    final canDiscard = !widget.busy && selectedCount > 0;
+
+    return Container(
+      width: widget.width,
+      decoration: BoxDecoration(
+        color: surfaceColor(context),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor(context)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0F0B1B3B),
+            blurRadius: 20,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.difference_outlined,
+                  color: Color(0xFF5865F2),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Uncommitted files',
+                        style: TextStyle(
+                          color: primaryTextColor(context),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        widget.branchName.isEmpty
+                            ? 'No branch selected'
+                            : '${widget.branchName} | ${widget.files.length} ${widget.files.length == 1 ? 'file' : 'files'}',
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: mutedTextColor(context),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: borderColor(context)),
+          Expanded(
+            child: widget.files.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(18),
+                      child: Text(
+                        'No uncommitted files on the current branch.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: mutedTextColor(context)),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+                    itemCount: visibleFiles.length + 2,
+                    separatorBuilder: (context, index) =>
+                        Divider(height: 1, color: borderColor(context)),
+                    itemBuilder: (context, index) {
+                      if (index == 0) {
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 8),
+                          child: TextField(
+                            controller: _filterController,
+                            enabled: !widget.busy,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              prefixIcon: Icon(Icons.filter_list, size: 18),
+                              labelText: 'Filter',
+                              border: OutlineInputBorder(),
+                            ),
+                            onChanged: (_) => setState(() {}),
+                          ),
+                        );
+                      }
+                      if (index == 1) {
+                        return CheckboxListTile(
+                          dense: true,
+                          value: allVisibleSelected,
+                          contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          title: Text(
+                            '$selectedCount selected of ${widget.files.length}',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w800,
+                              color: primaryTextColor(context),
+                            ),
+                          ),
+                          onChanged: visibleFiles.isEmpty || widget.busy
+                              ? null
+                              : (checked) =>
+                                    _toggleAll(checked ?? false, visibleFiles),
+                        );
+                      }
+                      final file = visibleFiles[index - 2];
+                      return ListTile(
+                        dense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        enabled: !widget.busy,
+                        leading: Checkbox(
+                          value: _selectedFiles.contains(file),
+                          onChanged: widget.busy
+                              ? null
+                              : (checked) =>
+                                    _toggleFile(file, checked ?? false),
+                        ),
+                        title: Text(
+                          file,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: primaryTextColor(context),
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        trailing: const Icon(Icons.chevron_right, size: 18),
+                        onTap: widget.busy
+                            ? null
+                            : () => widget.onOpenDiff(file),
+                      );
+                    },
+                  ),
+          ),
+          Divider(height: 1, color: borderColor(context)),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _messageController,
+                  enabled: !widget.busy,
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: 'Commit message',
+                    border: OutlineInputBorder(),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: _descriptionController,
+                  enabled: !widget.busy,
+                  minLines: 3,
+                  maxLines: 5,
+                  decoration: const InputDecoration(
+                    alignLabelWithHint: true,
+                    labelText: 'Description',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: canDiscard ? _discardSelected : null,
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Discard'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.outlined(
+                      tooltip: 'Discard all',
+                      onPressed: widget.busy || widget.files.isEmpty
+                          ? null
+                          : _discardAll,
+                      icon: const Icon(Icons.delete_sweep_outlined),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: canCommit ? _commitSelected : null,
+                    icon: const Icon(Icons.check),
+                    label: Text(
+                      selectedCount == widget.files.length
+                          ? 'Commit all to ${widget.branchName}'
+                          : 'Commit $selectedCount file${selectedCount == 1 ? '' : 's'}',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class DiffDialog extends StatelessWidget {
+  const DiffDialog({required this.filePath, required this.diff, super.key});
+
+  final String filePath;
+  final String diff;
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = diff.trim().isEmpty
+        ? const ['No diff available.']
+        : diff.replaceAll('\r\n', '\n').split('\n');
+    return AlertDialog(
+      title: Text(filePath, overflow: TextOverflow.ellipsis),
+      content: SizedBox(
+        width: 980,
+        height: 620,
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: const Color(0xFF1F242B),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Scrollbar(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: SizedBox(
+                width: 1180,
+                child: Scrollbar(
+                  child: ListView.builder(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    itemCount: lines.length,
+                    itemBuilder: (context, index) {
+                      return DiffLineRow(
+                        lineNumber: index + 1,
+                        text: lines[index],
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
+class DiffLineRow extends StatelessWidget {
+  const DiffLineRow({required this.lineNumber, required this.text, super.key});
+
+  final int lineNumber;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final type = _DiffLineType.from(text);
+    return Container(
+      color: type.background,
+      constraints: const BoxConstraints(minHeight: 24),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 62,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            color: type.gutter,
+            alignment: Alignment.centerRight,
+            child: Text(
+              '$lineNumber',
+              style: const TextStyle(
+                color: Color(0xFF9CA3AF),
+                fontFamily: 'Consolas',
+                fontSize: 12,
+              ),
+            ),
+          ),
+          Container(
+            width: 28,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            color: type.gutter,
+            alignment: Alignment.center,
+            child: Text(
+              type.marker,
+              style: TextStyle(
+                color: type.foreground,
+                fontFamily: 'Consolas',
+                fontSize: 12,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: SelectableText(
+                text,
+                style: TextStyle(
+                  color: type.foreground,
+                  fontFamily: 'Consolas',
+                  fontSize: 12,
+                  height: 1.35,
+                  fontWeight: type.isHeader ? FontWeight.w700 : FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+enum _DiffLineKind { added, removed, hunk, header, context }
+
+class _DiffLineType {
+  const _DiffLineType({
+    required this.kind,
+    required this.background,
+    required this.gutter,
+    required this.foreground,
+    required this.marker,
+  });
+
+  final _DiffLineKind kind;
+  final Color background;
+  final Color gutter;
+  final Color foreground;
+  final String marker;
+
+  bool get isHeader =>
+      kind == _DiffLineKind.header || kind == _DiffLineKind.hunk;
+
+  static _DiffLineType from(String line) {
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      return const _DiffLineType(
+        kind: _DiffLineKind.added,
+        background: Color(0xFF123D22),
+        gutter: Color(0xFF0F2F1B),
+        foreground: Color(0xFFE8FFF0),
+        marker: '+',
+      );
+    }
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      return const _DiffLineType(
+        kind: _DiffLineKind.removed,
+        background: Color(0xFF4A1018),
+        gutter: Color(0xFF350C12),
+        foreground: Color(0xFFFFE8EA),
+        marker: '-',
+      );
+    }
+    if (line.startsWith('@@')) {
+      return const _DiffLineType(
+        kind: _DiffLineKind.hunk,
+        background: Color(0xFF2A3038),
+        gutter: Color(0xFF222831),
+        foreground: Color(0xFFB7C7E6),
+        marker: '',
+      );
+    }
+    if (line.startsWith('diff --git') ||
+        line.startsWith('index ') ||
+        line.startsWith('---') ||
+        line.startsWith('+++') ||
+        line.startsWith('Untracked file:')) {
+      return const _DiffLineType(
+        kind: _DiffLineKind.header,
+        background: Color(0xFF252B33),
+        gutter: Color(0xFF20262D),
+        foreground: Color(0xFFE5E7EB),
+        marker: '',
+      );
+    }
+    return const _DiffLineType(
+      kind: _DiffLineKind.context,
+      background: Color(0xFF1F242B),
+      gutter: Color(0xFF1A1F25),
+      foreground: Color(0xFFD1D5DB),
+      marker: '',
+    );
+  }
+}
+
+class FooterCredit extends StatelessWidget {
+  const FooterCredit({required this.onOpenGithubProfile, super.key});
+
+  final VoidCallback onOpenGithubProfile;
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.center,
+      child: TextButton.icon(
+        onPressed: onOpenGithubProfile,
+        icon: const GitHubMark(size: 18),
+        label: const Text(
+          'Made with <3 MAK',
+          style: TextStyle(
+            color: Color(0xFF344160),
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class GitHubMark extends StatelessWidget {
+  const GitHubMark({required this.size, super.key});
+
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      size: Size.square(size),
+      painter: const GitHubMarkPainter(),
+    );
+  }
+}
+
+class GitHubMarkPainter extends CustomPainter {
+  const GitHubMarkPainter();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFF24292F)
+      ..style = PaintingStyle.fill;
+    final center = size.center(Offset.zero);
+    final radius = size.shortestSide / 2;
+    canvas.drawCircle(center, radius, paint);
+
+    final white = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+    final headRect = Rect.fromCenter(
+      center: Offset(center.dx, center.dy + radius * 0.08),
+      width: radius * 1.16,
+      height: radius * 0.86,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(headRect, Radius.circular(radius * 0.32)),
+      white,
+    );
+    canvas.drawCircle(
+      Offset(center.dx - radius * 0.42, center.dy - radius * 0.35),
+      radius * 0.24,
+      white,
+    );
+    canvas.drawCircle(
+      Offset(center.dx + radius * 0.42, center.dy - radius * 0.35),
+      radius * 0.24,
+      white,
+    );
+
+    final cutout = Paint()
+      ..color = const Color(0xFF24292F)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(
+      Offset(center.dx - radius * 0.23, center.dy - radius * 0.02),
+      radius * 0.08,
+      cutout,
+    );
+    canvas.drawCircle(
+      Offset(center.dx + radius * 0.23, center.dy - radius * 0.02),
+      radius * 0.08,
+      cutout,
+    );
+    canvas.drawRect(
+      Rect.fromCenter(
+        center: Offset(center.dx, center.dy + radius * 0.58),
+        width: radius * 0.28,
+        height: radius * 0.42,
+      ),
+      white,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant GitHubMarkPainter oldDelegate) => false;
 }
 
 class BranchGrid extends StatefulWidget {
@@ -1330,51 +2594,51 @@ class _BranchGridState extends State<BranchGrid> {
 
   @override
   Widget build(BuildContext context) {
-    return Expanded(
-      child: Stack(
-        children: [
-          GridView.builder(
-            itemCount: widget.branches.length,
-            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-              maxCrossAxisExtent: widget.cardSize,
-              mainAxisExtent: widget.cardSize * 0.92,
-              crossAxisSpacing: 24,
-              mainAxisSpacing: 24,
-            ),
-            itemBuilder: (context, index) {
-              final branch = widget.branches[index];
-              return KeyedSubtree(
-                key: _keyFor(branch.branchName),
-                child: BranchCardDropZone(
-                  branch: branch,
-                  busy: widget.busy,
-                  onSwap: (from) => widget.onSwapBranches(from, branch),
-                  child: BranchCard(
-                    branch: branch,
-                    isCurrentBranch: branch.branchName == widget.currentBranch,
-                    checkoutBlocked: widget.checkoutBlocked,
-                    busy: widget.busy,
-                    onRefresh: () => widget.onRefresh(branch),
-                    onPull: () => widget.onPull(branch),
-                    onCheckout: () => widget.onCheckout(branch),
-                    onCommit: () => widget.onCommit(branch),
-                    onPush: () => widget.onPush(branch),
-                    onUndoCommit: () => widget.onUndoCommit(branch),
-                  ),
-                ),
-              );
-            },
+    final scale = (widget.cardSize / 360).clamp(0.62, 1.28).toDouble();
+    return Stack(
+      children: [
+        GridView.builder(
+          itemCount: widget.branches.length,
+          gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: widget.cardSize,
+            mainAxisExtent: widget.cardSize,
+            crossAxisSpacing: 24,
+            mainAxisSpacing: 24,
           ),
-          if (widget.syncAnimation != null)
-            Positioned.fill(
-              child: SyncMergeOverlay(
-                cardKeys: _cardKeys,
-                state: widget.syncAnimation!,
-                cardHeight: widget.cardSize * 0.92,
+          itemBuilder: (context, index) {
+            final branch = widget.branches[index];
+            return KeyedSubtree(
+              key: _keyFor(branch.branchName),
+              child: BranchCardDropZone(
+                branch: branch,
+                busy: widget.busy,
+                onSwap: (from) => widget.onSwapBranches(from, branch),
+                child: BranchCard(
+                  branch: branch,
+                  isCurrentBranch: branch.branchName == widget.currentBranch,
+                  checkoutBlocked: widget.checkoutBlocked,
+                  busy: widget.busy,
+                  scale: scale,
+                  onRefresh: () => widget.onRefresh(branch),
+                  onPull: () => widget.onPull(branch),
+                  onCheckout: () => widget.onCheckout(branch),
+                  onCommit: () => widget.onCommit(branch),
+                  onPush: () => widget.onPush(branch),
+                  onUndoCommit: () => widget.onUndoCommit(branch),
+                ),
               ),
+            );
+          },
+        ),
+        if (widget.syncAnimation != null)
+          Positioned.fill(
+            child: SyncMergeOverlay(
+              cardKeys: _cardKeys,
+              state: widget.syncAnimation!,
+              cardHeight: widget.cardSize,
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
@@ -1749,9 +3013,9 @@ class BranchCardSizeSlider extends StatelessWidget {
           Expanded(
             child: Slider(
               value: value,
-              min: 280,
+              min: 220,
               max: 480,
-              divisions: 10,
+              divisions: 13,
               label: '${value.round()} px',
               onChanged: onChanged,
             ),
@@ -1777,6 +3041,7 @@ class UpdateStatusPanel extends StatelessWidget {
     required this.error,
     required this.onCheck,
     required this.onOpenRelease,
+    required this.onInstallUpdate,
     required this.onAutoCheckChanged,
     super.key,
   });
@@ -1787,6 +3052,7 @@ class UpdateStatusPanel extends StatelessWidget {
   final String? error;
   final VoidCallback onCheck;
   final VoidCallback onOpenRelease;
+  final VoidCallback onInstallUpdate;
   final ValueChanged<bool> onAutoCheckChanged;
 
   @override
@@ -1810,8 +3076,8 @@ class UpdateStatusPanel extends StatelessWidget {
 
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFFF7F8FF),
-        border: Border.all(color: const Color(0xFFE0E5EE)),
+        color: elevatedSurfaceColor(context),
+        border: Border.all(color: borderColor(context)),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
@@ -1869,6 +3135,15 @@ class UpdateStatusPanel extends StatelessWidget {
                         )
                       : const Icon(Icons.refresh),
                 ),
+                FilledButton.icon(
+                  onPressed:
+                      hasUpdate && release?.preferredAsset != null && !checking
+                      ? onInstallUpdate
+                      : null,
+                  icon: const Icon(Icons.download_for_offline),
+                  label: const Text('Install'),
+                ),
+                const SizedBox(width: 8),
                 OutlinedButton.icon(
                   onPressed: release?.url.isEmpty ?? true
                       ? null
@@ -1915,6 +3190,160 @@ class VersionPair extends StatelessWidget {
   }
 }
 
+class UpdateInstallDialog extends StatefulWidget {
+  const UpdateInstallDialog({
+    required this.release,
+    required this.asset,
+    required this.updateService,
+    required this.onOpenFile,
+    super.key,
+  });
+
+  final ReleaseInfo release;
+  final ReleaseAsset asset;
+  final UpdateService updateService;
+  final Future<void> Function(FileSystemEntity file) onOpenFile;
+
+  @override
+  State<UpdateInstallDialog> createState() => _UpdateInstallDialogState();
+}
+
+class _UpdateInstallDialogState extends State<UpdateInstallDialog> {
+  UpdateDownloadProgress? _progress;
+  File? _downloadedFile;
+  String? _error;
+  var _downloading = false;
+  var _opening = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_download());
+  }
+
+  Future<void> _download() async {
+    setState(() {
+      _downloading = true;
+      _error = null;
+    });
+    try {
+      final file = await widget.updateService.downloadAsset(
+        widget.asset,
+        onProgress: (progress) {
+          if (!mounted) return;
+          setState(() => _progress = progress);
+        },
+      );
+      if (!mounted) return;
+      setState(() => _downloadedFile = file);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = error.toString());
+    } finally {
+      if (mounted) {
+        setState(() => _downloading = false);
+      }
+    }
+  }
+
+  Future<void> _openDownloaded() async {
+    final file = _downloadedFile;
+    if (file == null) return;
+    setState(() => _opening = true);
+    try {
+      await widget.onOpenFile(file);
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _opening = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final progress = _progress;
+    final fraction = progress?.fraction;
+    final percent = fraction == null ? '' : '${(fraction * 100).round()}%';
+    final sizeText = progress == null
+        ? formatBytes(widget.asset.size)
+        : '${formatBytes(progress.receivedBytes)} / ${formatBytes(progress.totalBytes > 0 ? progress.totalBytes : widget.asset.size)}';
+
+    return AlertDialog(
+      title: Text('Install update v${widget.release.version}'),
+      content: SizedBox(
+        width: 520,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              widget.asset.name,
+              style: const TextStyle(fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Downloaded from GitHub Releases',
+              style: TextStyle(color: mutedTextColor(context)),
+            ),
+            const SizedBox(height: 18),
+            LinearProgressIndicator(value: fraction),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Text(
+                  _downloadedFile == null
+                      ? 'Downloading $percent'
+                      : 'Download complete',
+                  style: TextStyle(color: mutedTextColor(context)),
+                ),
+                const Spacer(),
+                Text(
+                  sizeText,
+                  style: TextStyle(color: mutedTextColor(context)),
+                ),
+              ],
+            ),
+            if (_downloadedFile != null) ...[
+              const SizedBox(height: 14),
+              SelectableText(
+                _downloadedFile!.path,
+                style: TextStyle(color: mutedTextColor(context), fontSize: 12),
+              ),
+            ],
+            if (_error != null) ...[
+              const SizedBox(height: 14),
+              Text(_error!, style: const TextStyle(color: Color(0xFFCF3030))),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _downloading ? null : () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+        if (_error != null)
+          OutlinedButton.icon(
+            onPressed: _downloading ? null : _download,
+            icon: const Icon(Icons.refresh),
+            label: const Text('Retry'),
+          ),
+        FilledButton.icon(
+          onPressed: _downloadedFile == null || _opening
+              ? null
+              : _openDownloaded,
+          icon: const Icon(Icons.install_desktop),
+          label: Text(_opening ? 'Opening' : 'Run installer'),
+        ),
+      ],
+    );
+  }
+}
+
 class StatusPill extends StatelessWidget {
   const StatusPill({required this.text, required this.color, super.key});
 
@@ -1940,9 +3369,10 @@ class StatusPill extends StatelessWidget {
 }
 
 class StatusBadge extends StatelessWidget {
-  const StatusBadge({required this.status, super.key});
+  const StatusBadge({required this.status, this.scale = 1, super.key});
 
   final BranchStatus? status;
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
@@ -1958,13 +3388,20 @@ class StatusBadge extends StatelessWidget {
       child: DecoratedBox(
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(8 * scale),
         ),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: EdgeInsets.symmetric(
+            horizontal: 12 * scale,
+            vertical: 8 * scale,
+          ),
           child: Text(
             text,
-            style: TextStyle(color: color, fontWeight: FontWeight.w700),
+            style: TextStyle(
+              color: color,
+              fontWeight: FontWeight.w700,
+              fontSize: 14 * scale,
+            ),
           ),
         ),
       ),
@@ -2003,23 +3440,28 @@ class CurrentBranchInline extends StatelessWidget {
 }
 
 class CurrentBranchBadge extends StatelessWidget {
-  const CurrentBranchBadge({super.key});
+  const CurrentBranchBadge({this.scale = 1, super.key});
+
+  final double scale;
 
   @override
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
         color: const Color(0xFF0EA044).withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(8 * scale),
       ),
-      child: const Padding(
-        padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: 8 * scale,
+          vertical: 4 * scale,
+        ),
         child: Text(
           'Current',
           style: TextStyle(
-            color: Color(0xFF0EA044),
+            color: const Color(0xFF0EA044),
             fontWeight: FontWeight.w700,
-            fontSize: 12,
+            fontSize: 12 * scale,
           ),
         ),
       ),
@@ -2173,6 +3615,8 @@ class SyncMergeDialog extends StatefulWidget {
 
 enum SyncMergeMode { bothDirections, oneWay }
 
+enum SyncOrderDirection { forward, backward }
+
 class _SyncMergeDialogState extends State<SyncMergeDialog> {
   late String _targetBranch = widget.branches.contains(widget.currentBranch)
       ? widget.currentBranch
@@ -2182,6 +3626,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
       .toList();
   late Set<String> _enabledSources = {..._sourceOrder};
   var _mode = SyncMergeMode.bothDirections;
+  var _direction = SyncOrderDirection.forward;
   var _pushAfterSync = false;
 
   void _setTarget(String target) {
@@ -2213,10 +3658,20 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
     final selectedSources = _sourceOrder
         .where((branch) => _enabledSources.contains(branch))
         .toList();
-    final selectedBranches = [_targetBranch, ...selectedSources];
+    final orderedForDirection = [_targetBranch, ...selectedSources];
+    final selectedBranches = _mode == SyncMergeMode.bothDirections
+        ? orderedForDirection
+        : _direction == SyncOrderDirection.forward
+        ? orderedForDirection
+        : orderedForDirection.reversed.toList();
+    final forwardText = orderedForDirection.join(' -> ');
+    final backwardText = orderedForDirection.reversed.join(' -> ');
+    final selectedPathText = _direction == SyncOrderDirection.forward
+        ? forwardText
+        : backwardText;
     final modeText = _mode == SyncMergeMode.bothDirections
         ? 'Each selected branch receives the merged changes.'
-        : 'Only $_targetBranch receives the selected source branches.';
+        : 'One-way sync follows the selected path: $selectedPathText.';
     return AlertDialog(
       title: const Text('Sync / Merge Branches'),
       content: SizedBox(
@@ -2245,6 +3700,36 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
             ),
             const SizedBox(height: 12),
             Text(modeText, style: const TextStyle(color: Color(0xFF647086))),
+            if (_mode == SyncMergeMode.oneWay) ...[
+              const SizedBox(height: 12),
+              SegmentedButton<SyncOrderDirection>(
+                segments: const [
+                  ButtonSegment(
+                    value: SyncOrderDirection.forward,
+                    icon: Icon(Icons.arrow_forward),
+                    label: Text('Forward'),
+                  ),
+                  ButtonSegment(
+                    value: SyncOrderDirection.backward,
+                    icon: Icon(Icons.arrow_back),
+                    label: Text('Backward'),
+                  ),
+                ],
+                selected: {_direction},
+                onSelectionChanged: (selected) {
+                  setState(() => _direction = selected.first);
+                },
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Forward: $forwardText',
+                style: const TextStyle(color: Color(0xFF647086), fontSize: 12),
+              ),
+              Text(
+                'Backward: $backwardText',
+                style: const TextStyle(color: Color(0xFF647086), fontSize: 12),
+              ),
+            ],
             const SizedBox(height: 10),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
@@ -2253,7 +3738,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
               subtitle: Text(
                 _mode == SyncMergeMode.bothDirections
                     ? 'Off by default. Enable only when you want to push every selected branch.'
-                    : 'Off by default. Enable only when you want to push the target branch.',
+                    : 'Off by default. Enable only when you want to push branches receiving merges.',
               ),
               controlAffinity: ListTileControlAffinity.leading,
               onChanged: (checked) {
@@ -2266,7 +3751,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
               decoration: InputDecoration(
                 labelText: _mode == SyncMergeMode.bothDirections
                     ? 'Start branch'
-                    : 'Merge into',
+                    : 'First branch',
               ),
               items: [
                 for (final branch in widget.branches)
@@ -2280,7 +3765,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
             Text(
               _mode == SyncMergeMode.bothDirections
                   ? 'Sync branches in this order'
-                  : 'Merge sources in this order',
+                  : 'One-way branches in this order',
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 8),
@@ -2343,14 +3828,17 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
         FilledButton.icon(
           onPressed: selectedSources.isEmpty
               ? null
-              : () => Navigator.of(context).pop(
-                  SyncMergeRequest(
-                    _targetBranch,
-                    selectedSources,
-                    bothDirections: _mode == SyncMergeMode.bothDirections,
-                    pushAfterSync: _pushAfterSync,
-                  ),
-                ),
+              : () {
+                  final bothDirections = _mode == SyncMergeMode.bothDirections;
+                  Navigator.of(context).pop(
+                    SyncMergeRequest(
+                      selectedBranches.first,
+                      selectedBranches.skip(1).toList(),
+                      bothDirections: bothDirections,
+                      pushAfterSync: _pushAfterSync,
+                    ),
+                  );
+                },
           icon: const Icon(Icons.merge_type),
           label: const Text('Run Sync'),
         ),
@@ -2374,7 +3862,7 @@ class SyncMergeRequest {
   final bool pushAfterSync;
 
   List<String> get branchesToPush =>
-      bothDirections ? [targetBranch, ...sourceBranches] : [targetBranch];
+      bothDirections ? [targetBranch, ...sourceBranches] : sourceBranches;
 }
 
 class SyncPreview extends StatelessWidget {
@@ -2451,11 +3939,11 @@ class SyncPreview extends StatelessWidget {
 
   String get _summaryText {
     final pushText = pushAfterSync
-        ? ' Then ${bothDirections ? 'all selected branches are' : 'the target branch is'} pushed.'
+        ? ' Then ${bothDirections ? 'all selected branches are' : 'branches receiving merges are'} pushed.'
         : '';
     final syncText = bothDirections
         ? 'Forward pass then backward pass keeps all selected branches aligned.'
-        : 'The source branches merge into the selected target only.';
+        : 'Each branch merges into the next branch in the selected path.';
     return '$syncText$pushText';
   }
 }
@@ -2560,6 +4048,7 @@ class CommitDialog extends StatefulWidget {
 
 class _CommitDialogState extends State<CommitDialog> {
   final _controller = TextEditingController();
+  final _descriptionController = TextEditingController();
   late final Set<String> _files = {...widget.files};
 
   @override
@@ -2571,6 +4060,7 @@ class _CommitDialogState extends State<CommitDialog> {
   @override
   void dispose() {
     _controller.dispose();
+    _descriptionController.dispose();
     super.dispose();
   }
 
@@ -2597,6 +4087,16 @@ class _CommitDialogState extends State<CommitDialog> {
               controller: _controller,
               decoration: const InputDecoration(labelText: 'Commit message'),
               autofocus: true,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _descriptionController,
+              minLines: 3,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                alignLabelWithHint: true,
+                labelText: 'Description',
+              ),
             ),
             const SizedBox(height: 18),
             if (widget.files.isEmpty)
@@ -2634,9 +4134,13 @@ class _CommitDialogState extends State<CommitDialog> {
         FilledButton(
           onPressed: widget.files.isEmpty
               ? null
-              : () => Navigator.of(
-                  context,
-                ).pop(CommitRequest(_controller.text, _files.toList())),
+              : () => Navigator.of(context).pop(
+                  CommitRequest(
+                    _controller.text,
+                    _files.toList(),
+                    description: _descriptionController.text,
+                  ),
+                ),
           child: Text(widget.actionLabel),
         ),
       ],
@@ -2645,9 +4149,10 @@ class _CommitDialogState extends State<CommitDialog> {
 }
 
 class CommitRequest {
-  const CommitRequest(this.message, this.files);
+  const CommitRequest(this.message, this.files, {this.description = ''});
   final String message;
   final List<String> files;
+  final String description;
 }
 
 class RepositoryTile extends StatelessWidget {
@@ -2672,12 +4177,10 @@ class RepositoryTile extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: surfaceColor(context),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: selected
-                  ? const Color(0xFF5865F2)
-                  : const Color(0xFFE0E5EE),
+              color: selected ? const Color(0xFF5865F2) : borderColor(context),
               width: selected ? 1.5 : 1,
             ),
           ),
@@ -2731,9 +4234,9 @@ class AppPanel extends StatelessWidget {
       constraints: const BoxConstraints(minHeight: 640),
       padding: const EdgeInsets.all(38),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: surfaceColor(context),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFE0E5EE)),
+        border: Border.all(color: borderColor(context)),
         boxShadow: const [
           BoxShadow(
             color: Color(0x120B1B3B),
@@ -2756,7 +4259,7 @@ class EmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     return Expanded(
       child: Center(
-        child: Text(text, style: const TextStyle(color: Color(0xFF647086))),
+        child: Text(text, style: TextStyle(color: mutedTextColor(context))),
       ),
     );
   }
@@ -2805,6 +4308,19 @@ String formatRelative(DateTime? value) {
       '${value.day.toString().padLeft(2, '0')} '
       '${value.hour.toString().padLeft(2, '0')}:'
       '${value.minute.toString().padLeft(2, '0')}';
+}
+
+String formatBytes(int bytes) {
+  if (bytes <= 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  var value = bytes.toDouble();
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  final precision = value >= 10 || unitIndex == 0 ? 0 : 1;
+  return '${value.toStringAsFixed(precision)} ${units[unitIndex]}';
 }
 
 String formatCommit(BranchStatus? status) {

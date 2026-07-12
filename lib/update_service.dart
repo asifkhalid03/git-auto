@@ -1,7 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
 
-const appVersion = '1.0.4';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+const appVersion = '1.0.5';
+
+class UpdateDownloadProgress {
+  const UpdateDownloadProgress({
+    required this.receivedBytes,
+    required this.totalBytes,
+  });
+
+  final int receivedBytes;
+  final int totalBytes;
+
+  double? get fraction =>
+      totalBytes <= 0 ? null : (receivedBytes / totalBytes).clamp(0, 1);
+}
 
 class ReleaseInfo {
   const ReleaseInfo({
@@ -17,6 +33,36 @@ class ReleaseInfo {
   final List<ReleaseAsset> assets;
 
   bool get isNewerThanCurrent => compareVersions(version, appVersion) > 0;
+
+  ReleaseAsset? get preferredAsset {
+    final candidates = assets.where((asset) {
+      final name = asset.name.toLowerCase();
+      return asset.downloadUrl.isNotEmpty &&
+          (name.endsWith('.exe') ||
+              name.endsWith('.msi') ||
+              name.endsWith('.zip')) &&
+          (Platform.isWindows ||
+              !name.contains('windows') && !name.contains('win'));
+    }).toList();
+    if (candidates.isEmpty) return null;
+    candidates.sort((a, b) {
+      int score(ReleaseAsset asset) {
+        final name = asset.name.toLowerCase();
+        if (Platform.isWindows && name.endsWith('.msi')) return 0;
+        if (Platform.isWindows &&
+            name.endsWith('.zip') &&
+            (name.contains('windows') || name.contains('win'))) {
+          return 1;
+        }
+        if (Platform.isWindows && name.endsWith('.exe')) return 2;
+        if (name.endsWith('.zip')) return 3;
+        return 4;
+      }
+
+      return score(a).compareTo(score(b));
+    });
+    return candidates.first;
+  }
 
   factory ReleaseInfo.fromJson(Map<String, dynamic> json) {
     final tag = (json['tag_name'] as String? ?? '').trim();
@@ -74,6 +120,57 @@ class UpdateService {
         );
       }
       return ReleaseInfo.fromJson(jsonDecode(body) as Map<String, dynamic>);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  Future<File> downloadAsset(
+    ReleaseAsset asset, {
+    void Function(UpdateDownloadProgress progress)? onProgress,
+  }) async {
+    if (asset.downloadUrl.isEmpty) {
+      throw const UpdateException('Release asset has no download URL.');
+    }
+
+    final supportDir = await getApplicationSupportDirectory();
+    final downloadDir = Directory(p.join(supportDir.path, 'updates'));
+    if (!await downloadDir.exists()) {
+      await downloadDir.create(recursive: true);
+    }
+    final file = File(p.join(downloadDir.path, asset.name));
+    final tempFile = File('${file.path}.download');
+
+    final client = HttpClient();
+    try {
+      final request = await client.getUrl(Uri.parse(asset.downloadUrl));
+      request.headers.set(
+        HttpHeaders.userAgentHeader,
+        'Git Auto update downloader',
+      );
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw UpdateException(
+          'Unable to download update (${response.statusCode}).',
+        );
+      }
+
+      final sink = tempFile.openWrite();
+      var received = 0;
+      final total = response.contentLength;
+      await for (final chunk in response) {
+        received += chunk.length;
+        sink.add(chunk);
+        onProgress?.call(
+          UpdateDownloadProgress(receivedBytes: received, totalBytes: total),
+        );
+      }
+      await sink.close();
+      if (await file.exists()) {
+        await file.delete();
+      }
+      await tempFile.rename(file.path);
+      return file;
     } finally {
       client.close(force: true);
     }

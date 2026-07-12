@@ -200,24 +200,43 @@ class GitOperationResult {
       );
 }
 
+class CommitHistoryEntry {
+  const CommitHistoryEntry({
+    required this.hash,
+    required this.shortHash,
+    required this.message,
+    required this.author,
+    required this.relativeTime,
+  });
+
+  final String hash;
+  final String shortHash;
+  final String message;
+  final String author;
+  final String relativeTime;
+}
+
 class AppStateSnapshot {
   const AppStateSnapshot({
     required this.repositories,
     required this.branches,
     required this.operations,
     this.autoCheckUpdates = true,
+    this.darkMode = false,
   });
 
   final List<RepositoryInfo> repositories;
   final List<TrackedBranch> branches;
   final List<GitOperationResult> operations;
   final bool autoCheckUpdates;
+  final bool darkMode;
 
   Map<String, dynamic> toJson() => {
     'repositories': repositories.map((repo) => repo.toJson()).toList(),
     'branches': branches.map((branch) => branch.toJson()).toList(),
     'operations': operations.map((op) => op.toJson()).toList(),
     'autoCheckUpdates': autoCheckUpdates,
+    'darkMode': darkMode,
   };
 
   factory AppStateSnapshot.fromJson(String source) {
@@ -235,6 +254,7 @@ class AppStateSnapshot {
           )
           .toList(),
       autoCheckUpdates: json['autoCheckUpdates'] as bool? ?? true,
+      darkMode: json['darkMode'] as bool? ?? false,
     );
   }
 
@@ -243,5 +263,6 @@ class AppStateSnapshot {
     branches: [],
     operations: [],
     autoCheckUpdates: true,
+    darkMode: false,
   );
 }

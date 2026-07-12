@@ -83,6 +83,40 @@ class GitService {
     return result.success ? result.stdout.trim() : '';
   }
 
+  Future<List<CommitHistoryEntry>> commitHistory({
+    required String repoPath,
+    required String branchName,
+    int limit = 24,
+  }) async {
+    final revision = branchName.trim().isEmpty ? 'HEAD' : branchName.trim();
+    final result = await _run([
+      'log',
+      '-n',
+      '$limit',
+      '--date=relative',
+      r'--format=%H%x1f%h%x1f%s%x1f%an%x1f%ar%x1e',
+      revision,
+    ], repoPath);
+    if (!result.success) return const [];
+    return result.stdout
+        .split('\x1e')
+        .map((entry) => entry.trim())
+        .where((entry) => entry.isNotEmpty)
+        .map((entry) {
+          final parts = entry.split('\x1f');
+          if (parts.length < 5) return null;
+          return CommitHistoryEntry(
+            hash: parts[0].trim(),
+            shortHash: parts[1].trim(),
+            message: parts[2].trim(),
+            author: parts[3].trim(),
+            relativeTime: parts[4].trim(),
+          );
+        })
+        .nonNulls
+        .toList();
+  }
+
   Future<String> upstreamFor(String repoPath, String branchName) async {
     final sameNameRemote = await _remoteBranchFor(repoPath, branchName);
     if (sameNameRemote.isNotEmpty) return sameNameRemote;
@@ -396,27 +430,13 @@ class GitService {
       return _resultFromProcess('sync', targetBranch, combined, startedAt);
     }
 
-    final checkout = await checkoutBranch(
-      repoPath: repoPath,
-      branchName: targetBranch,
-    );
-    combined = _combine(
-      combined,
-      _GitProcessResult(
-        exitCode: checkout.success ? 0 : 1,
-        stdout: checkout.stdout,
-        stderr: checkout.stderr,
-      ),
-    );
-    if (!checkout.success) {
-      return _resultFromProcess('sync', targetBranch, combined, startedAt);
-    }
-
-    for (final source in sources) {
-      final revision = await _branchRevision(repoPath, source);
-      final merge = await _run(['merge', '--no-edit', revision], repoPath);
-      combined = _combine(combined, merge);
-      if (!merge.success) {
+    final orderedBranches = [targetBranch, ...sources];
+    for (var index = 1; index < orderedBranches.length; index++) {
+      final success = await mergeInto(
+        orderedBranches[index],
+        orderedBranches[index - 1],
+      );
+      if (!success) {
         return _resultFromProcess('sync', targetBranch, combined, startedAt);
       }
     }
@@ -434,11 +454,41 @@ class GitService {
         .toList();
   }
 
+  Future<String> diffForFile(String worktreePath, String filePath) async {
+    final unstaged = await _run(['diff', '--', filePath], worktreePath);
+    if (unstaged.success && unstaged.stdout.trim().isNotEmpty) {
+      return unstaged.stdout;
+    }
+
+    final staged = await _run([
+      'diff',
+      '--cached',
+      '--',
+      filePath,
+    ], worktreePath);
+    if (staged.success && staged.stdout.trim().isNotEmpty) {
+      return staged.stdout;
+    }
+
+    final file = File(p.join(worktreePath, filePath));
+    if (await file.exists()) {
+      try {
+        final content = await file.readAsString();
+        return 'Untracked file: $filePath\n\n$content';
+      } catch (_) {
+        return 'Untracked file: $filePath\n\nUnable to display this file as text.';
+      }
+    }
+
+    return 'No diff available for $filePath.';
+  }
+
   Future<GitOperationResult> commitBranch({
     required String worktreePath,
     required String branchName,
     required String message,
     required List<String> files,
+    String description = '',
   }) async {
     final startedAt = DateTime.now();
     if (message.trim().isEmpty) {
@@ -470,11 +520,61 @@ class GitService {
     if (!add.success) {
       return _resultFromProcess('commit', branchName, add, startedAt);
     }
-    final commit = await _run(['commit', '-m', message.trim()], worktreePath);
+    final args = ['commit', '-m', message.trim()];
+    if (description.trim().isNotEmpty) {
+      args.addAll(['-m', description.trim()]);
+    }
+    final commit = await _run(args, worktreePath);
     return _resultFromProcess(
       'commit',
       branchName,
       _combine(add, commit),
+      startedAt,
+    );
+  }
+
+  Future<GitOperationResult> discardFiles({
+    required String worktreePath,
+    required String branchName,
+    required List<String> files,
+  }) async {
+    final startedAt = DateTime.now();
+    if (files.isEmpty) {
+      return _manualFailure(
+        'discard',
+        branchName,
+        'Select at least one file to discard.',
+        startedAt,
+      );
+    }
+
+    final restore = await _run([
+      'restore',
+      '--staged',
+      '--worktree',
+      '--',
+      ...files,
+    ], worktreePath);
+    if (restore.success) {
+      return _resultFromProcess('discard', branchName, restore, startedAt);
+    }
+
+    final checkout = await _run(['checkout', '--', ...files], worktreePath);
+    if (checkout.success) {
+      final clean = await _run(['clean', '-f', '--', ...files], worktreePath);
+      return _resultFromProcess(
+        'discard',
+        branchName,
+        _combine(checkout, clean),
+        startedAt,
+      );
+    }
+
+    final clean = await _run(['clean', '-f', '--', ...files], worktreePath);
+    return _resultFromProcess(
+      'discard',
+      branchName,
+      _combine(restore, _combine(checkout, clean)),
       startedAt,
     );
   }
