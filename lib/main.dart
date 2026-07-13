@@ -375,7 +375,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         '${targetDir.path}${Platform.pathSeparator}automation_git_workflow.exe',
       );
       if (await exe.exists()) {
-        await _openDownloadedUpdate(exe);
+        await _launchUpdatedAppAndExit(exe);
         return;
       }
       await _openDownloadedUpdate(targetDir);
@@ -396,6 +396,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     }
 
     if (Platform.isWindows) {
+      if (file.path.toLowerCase().endsWith('.exe')) {
+        await _launchUpdatedAppAndExit(file);
+        return;
+      }
       await Process.start(file.path, [], mode: ProcessStartMode.detached);
       return;
     }
@@ -404,6 +408,17 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       return;
     }
     await Process.start('xdg-open', [file.path]);
+  }
+
+  Future<void> _launchUpdatedAppAndExit(FileSystemEntity file) async {
+    await Process.start(
+      file.path,
+      const [],
+      mode: ProcessStartMode.detached,
+      workingDirectory: File(file.path).parent.path,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+    exit(0);
   }
 
   String _psQuote(String value) => "'${value.replaceAll("'", "''")}'";
@@ -1349,6 +1364,7 @@ class RepositoryDashboard extends StatelessWidget {
               child: SizedBox(
                 height: panelHeight,
                 child: AppPanel(
+                  padding: const EdgeInsets.fromLTRB(38, 38, 38, 10),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -1511,23 +1527,14 @@ class RepositoryDashboard extends StatelessWidget {
                         const SizedBox(height: 12),
                         SyncMergeLegend(state: syncAnimation!),
                       ],
-                      if (message != null) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          message!,
-                          style: TextStyle(color: mutedTextColor(context)),
-                        ),
-                      ],
-                      if (operations.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        Text(
-                          'Last operation: ${operations.first.operation} '
-                          '${operations.first.success ? 'succeeded' : 'failed'}',
-                          style: TextStyle(color: mutedTextColor(context)),
-                        ),
-                      ],
-                      const SizedBox(height: 14),
-                      FooterCredit(onOpenGithubProfile: onOpenGithubProfile),
+                      const SizedBox(height: 8),
+                      DashboardFooter(
+                        message: message,
+                        operation: operations.isEmpty
+                            ? null
+                            : operations.first,
+                        onOpenGithubProfile: onOpenGithubProfile,
+                      ),
                     ],
                   ),
                 ),
@@ -2487,24 +2494,88 @@ class _DiffLineType {
 }
 
 class FooterCredit extends StatelessWidget {
-  const FooterCredit({required this.onOpenGithubProfile, super.key});
+  const FooterCredit({
+    required this.onOpenGithubProfile,
+    this.compact = false,
+    super.key,
+  });
 
+  final VoidCallback onOpenGithubProfile;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      onPressed: onOpenGithubProfile,
+      style: TextButton.styleFrom(
+        minimumSize: Size(0, compact ? 28 : 40),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 6 : 12,
+          vertical: compact ? 2 : 8,
+        ),
+      ),
+      icon: GitHubMark(size: compact ? 14 : 18),
+      label: Text(
+        'Made with <3 MAK',
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: isDarkMode(context)
+              ? const Color(0xFF94A3B8)
+              : const Color(0xFF344160),
+          fontSize: compact ? 12 : null,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class DashboardFooter extends StatelessWidget {
+  const DashboardFooter({
+    required this.message,
+    required this.operation,
+    required this.onOpenGithubProfile,
+    super.key,
+  });
+
+  final String? message;
+  final GitOperationResult? operation;
   final VoidCallback onOpenGithubProfile;
 
   @override
   Widget build(BuildContext context) {
-    return Align(
-      alignment: Alignment.center,
-      child: TextButton.icon(
-        onPressed: onOpenGithubProfile,
-        icon: const GitHubMark(size: 18),
-        label: const Text(
-          'Made with <3 MAK',
-          style: TextStyle(
-            color: Color(0xFF344160),
-            fontWeight: FontWeight.w700,
+    final operationText = operation == null
+        ? null
+        : 'Last operation: ${operation!.operation} '
+              '${operation!.success ? 'succeeded' : 'failed'}';
+    final statusParts = [
+      if (message != null && message!.trim().isNotEmpty) message!.trim(),
+      ?operationText,
+    ];
+
+    return SizedBox(
+      height: 30,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              statusParts.join('  |  '),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: mutedTextColor(context),
+                fontSize: 12,
+                height: 1.1,
+              ),
+            ),
           ),
-        ),
+          const SizedBox(width: 12),
+          FooterCredit(
+            compact: true,
+            onOpenGithubProfile: onOpenGithubProfile,
+          ),
+        ],
       ),
     );
   }
@@ -3387,7 +3458,7 @@ class _UpdateInstallDialogState extends State<UpdateInstallDialog> {
               ? null
               : _openDownloaded,
           icon: const Icon(Icons.install_desktop),
-          label: Text(_opening ? 'Opening' : 'Run installer'),
+          label: Text(_opening ? 'Restarting' : 'Install and restart'),
         ),
       ],
     );
@@ -4274,15 +4345,20 @@ class RepositoryTile extends StatelessWidget {
 }
 
 class AppPanel extends StatelessWidget {
-  const AppPanel({required this.child, super.key});
+  const AppPanel({
+    required this.child,
+    this.padding = const EdgeInsets.all(38),
+    super.key,
+  });
 
   final Widget child;
+  final EdgeInsetsGeometry padding;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       constraints: const BoxConstraints(minHeight: 640),
-      padding: const EdgeInsets.all(38),
+      padding: padding,
       decoration: BoxDecoration(
         color: surfaceColor(context),
         borderRadius: BorderRadius.circular(8),

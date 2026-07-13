@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const appVersion = '1.0.6';
+const appVersion = '1.0.7';
 
 class UpdateDownloadProgress {
   const UpdateDownloadProgress({
