@@ -349,12 +349,15 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
 
   Future<void> _openDownloadedUpdate(FileSystemEntity file) async {
     if (file.path.toLowerCase().endsWith('.zip')) {
-      final targetDir = Directory(
-        file.path.replaceFirst(RegExp(r'\.zip$', caseSensitive: false), ''),
+      final basePath = file.path.replaceFirst(
+        RegExp(r'\.zip$', caseSensitive: false),
+        '',
       );
-      if (await targetDir.exists()) {
-        await targetDir.delete(recursive: true);
-      }
+      final stamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(RegExp(r'[^0-9]'), '')
+          .substring(0, 14);
+      final targetDir = Directory('${basePath}_$stamp');
       await targetDir.create(recursive: true);
 
       if (Platform.isWindows) {
