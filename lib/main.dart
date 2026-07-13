@@ -110,6 +110,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       _operations = snapshot.operations;
       _autoCheckUpdates = snapshot.autoCheckUpdates;
       _darkMode = snapshot.darkMode;
+      _cardSize = snapshot.cardSize.clamp(220.0, 460.0).toDouble();
       _selectedRepo = _repositories.firstOrNull;
       _loading = false;
     });
@@ -250,6 +251,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         operations: _operations.take(25).toList(),
         autoCheckUpdates: _autoCheckUpdates,
         darkMode: _darkMode,
+        cardSize: _cardSize,
       ),
     );
   }
@@ -266,6 +268,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     if (value) {
       await _checkForUpdates();
     }
+  }
+
+  Future<void> _setCardSize(double value) async {
+    setState(() => _cardSize = value);
+    await _save();
   }
 
   Future<void> _checkForUpdates({bool silent = false}) async {
@@ -1103,8 +1110,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                             setState(() => _selectedRepo = repo);
                             unawaited(_refreshCurrentBranch(repo));
                           },
-                          onCardSizeChanged: (value) =>
-                              setState(() => _cardSize = value),
+                          onCardSizeChanged: _setCardSize,
                           onCheckUpdates: _checkForUpdates,
                           onOpenRelease: _openReleasePage,
                           onInstallUpdate: _downloadAndInstallUpdate,

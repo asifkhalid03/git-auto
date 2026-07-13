@@ -223,6 +223,7 @@ class AppStateSnapshot {
     required this.operations,
     this.autoCheckUpdates = true,
     this.darkMode = false,
+    this.cardSize = 360.0,
   });
 
   final List<RepositoryInfo> repositories;
@@ -230,6 +231,7 @@ class AppStateSnapshot {
   final List<GitOperationResult> operations;
   final bool autoCheckUpdates;
   final bool darkMode;
+  final double cardSize;
 
   Map<String, dynamic> toJson() => {
     'repositories': repositories.map((repo) => repo.toJson()).toList(),
@@ -237,6 +239,7 @@ class AppStateSnapshot {
     'operations': operations.map((op) => op.toJson()).toList(),
     'autoCheckUpdates': autoCheckUpdates,
     'darkMode': darkMode,
+    'cardSize': cardSize,
   };
 
   factory AppStateSnapshot.fromJson(String source) {
@@ -255,6 +258,7 @@ class AppStateSnapshot {
           .toList(),
       autoCheckUpdates: json['autoCheckUpdates'] as bool? ?? true,
       darkMode: json['darkMode'] as bool? ?? false,
+      cardSize: (json['cardSize'] as num?)?.toDouble() ?? 360.0,
     );
   }
 
@@ -264,5 +268,6 @@ class AppStateSnapshot {
     operations: [],
     autoCheckUpdates: true,
     darkMode: false,
+    cardSize: 360.0,
   );
 }
