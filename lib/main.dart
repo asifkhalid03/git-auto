@@ -813,11 +813,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         );
       });
       try {
-        final result = await _git.syncMergeBranches(
+        final result = await _git.syncSequentialBranches(
           repoPath: repo.path,
-          targetBranch: request.targetBranch,
-          sourceBranches: request.sourceBranches,
-          bothDirections: request.bothDirections,
+          startBranch: request.targetBranch,
+          nextBranches: request.sourceBranches,
           onStep: (step) async {
             if (!mounted) return;
             setState(() {
@@ -1539,9 +1538,7 @@ class RepositoryDashboard extends StatelessWidget {
                       const SizedBox(height: 8),
                       DashboardFooter(
                         message: message,
-                        operation: operations.isEmpty
-                            ? null
-                            : operations.first,
+                        operation: operations.isEmpty ? null : operations.first,
                         onOpenGithubProfile: onOpenGithubProfile,
                       ),
                     ],
@@ -2580,10 +2577,7 @@ class DashboardFooter extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          FooterCredit(
-            compact: true,
-            onOpenGithubProfile: onOpenGithubProfile,
-          ),
+          FooterCredit(compact: true, onOpenGithubProfile: onOpenGithubProfile),
         ],
       ),
     );
@@ -3800,8 +3794,8 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
         ? forwardText
         : backwardText;
     final modeText = _mode == SyncMergeMode.bothDirections
-        ? 'Each selected branch receives the merged changes.'
-        : 'One-way sync follows the selected path: $selectedPathText.';
+        ? 'Branches are pulled in order. Neighbor pairs sync both ways forward, then backward, so changes propagate across the chain.'
+        : 'Sequential sync follows the selected path: $selectedPathText.';
     return AlertDialog(
       title: const Text('Sync / Merge Branches'),
       content: SizedBox(
@@ -3866,9 +3860,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
               value: _pushAfterSync,
               title: const Text('Push after sync'),
               subtitle: Text(
-                _mode == SyncMergeMode.bothDirections
-                    ? 'Off by default. Enable only when you want to push every selected branch.'
-                    : 'Off by default. Enable only when you want to push branches receiving merges.',
+                'Off by default. Enable only when you want to push every selected branch after sync.',
               ),
               controlAffinity: ListTileControlAffinity.leading,
               onChanged: (checked) {
@@ -3991,8 +3983,7 @@ class SyncMergeRequest {
 
   final bool pushAfterSync;
 
-  List<String> get branchesToPush =>
-      bothDirections ? [targetBranch, ...sourceBranches] : sourceBranches;
+  List<String> get branchesToPush => [targetBranch, ...sourceBranches];
 }
 
 class SyncPreview extends StatelessWidget {
@@ -4046,12 +4037,10 @@ class SyncPreview extends StatelessWidget {
                     emphasized: index == 0,
                   ),
                   if (index < branches.length - 1)
-                    Icon(
-                      bothDirections
-                          ? Icons.compare_arrows
-                          : Icons.arrow_forward,
+                    const Icon(
+                      Icons.arrow_forward,
                       size: 18,
-                      color: const Color(0xFF5865F2),
+                      color: Color(0xFF5865F2),
                     ),
                 ],
               ],
@@ -4069,11 +4058,10 @@ class SyncPreview extends StatelessWidget {
 
   String get _summaryText {
     final pushText = pushAfterSync
-        ? ' Then ${bothDirections ? 'all selected branches are' : 'branches receiving merges are'} pushed.'
+        ? ' Then all selected branches are pushed.'
         : '';
-    final syncText = bothDirections
-        ? 'Forward pass then backward pass keeps all selected branches aligned.'
-        : 'Each branch merges into the next branch in the selected path.';
+    const syncText =
+        'Each branch is pulled in order. Neighboring pairs sync both ways forward, then backward, so all selected branches receive the chain updates.';
     return '$syncText$pushText';
   }
 }

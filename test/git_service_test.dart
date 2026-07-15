@@ -327,6 +327,212 @@ void main() {
       }
     },
   );
+
+  test('syncSequentialBranches syncs each adjacent pair both ways', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+    await _runGit(['switch', 'branch-b'], fixture.otherDir);
+    await File(
+      '${fixture.otherDir}${Platform.pathSeparator}remote-b.txt',
+    ).writeAsString('remote b');
+    await _runGit(['add', 'remote-b.txt'], fixture.otherDir);
+    await _runGit(['commit', '-m', 'Remote B update'], fixture.otherDir);
+    await _runGit(['push'], fixture.otherDir);
+
+    final steps = <String>[];
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    final result = await git.syncSequentialBranches(
+      repoPath: fixture.repoDir.path,
+      startBranch: 'branch-a',
+      nextBranches: ['branch-b', 'branch-c'],
+      onStep: (step) async {
+        steps.add('${step.fromBranch}->${step.toBranch}');
+      },
+    );
+
+    expect(result.success, isTrue, reason: result.summary);
+    expect(
+      steps,
+      containsAllInOrder([
+        'branch-b->branch-a',
+        'branch-a->branch-b',
+        'branch-c->branch-b',
+        'branch-b->branch-c',
+      ]),
+    );
+    for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
+      await _runGit(['switch', branch], fixture.repoDir.path);
+      expect(
+        await File(
+          '${fixture.repoDir.path}${Platform.pathSeparator}remote-b.txt',
+        ).exists(),
+        isTrue,
+        reason: '$branch should receive branch-b pulled changes',
+      );
+    }
+  });
+
+  test(
+    'syncSequentialBranches passes branch-c pulled changes through adjacent pairs',
+    () async {
+      final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+      await _runGit(['switch', 'branch-c'], fixture.otherDir);
+      await File(
+        '${fixture.otherDir}${Platform.pathSeparator}remote-c.txt',
+      ).writeAsString('remote c');
+      await _runGit(['add', 'remote-c.txt'], fixture.otherDir);
+      await _runGit(['commit', '-m', 'Remote C update'], fixture.otherDir);
+      await _runGit(['push'], fixture.otherDir);
+
+      final steps = <String>[];
+      await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+      final result = await git.syncSequentialBranches(
+        repoPath: fixture.repoDir.path,
+        startBranch: 'branch-a',
+        nextBranches: ['branch-b', 'branch-c'],
+        onStep: (step) async {
+          steps.add('${step.fromBranch}->${step.toBranch}');
+        },
+      );
+
+      expect(result.success, isTrue, reason: result.summary);
+      expect(
+        steps,
+        containsAllInOrder([
+          'branch-b->branch-a',
+          'branch-a->branch-b',
+          'branch-c->branch-b',
+          'branch-b->branch-c',
+        ]),
+      );
+      for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
+        await _runGit(['switch', branch], fixture.repoDir.path);
+        expect(
+          await File(
+            '${fixture.repoDir.path}${Platform.pathSeparator}remote-c.txt',
+          ).exists(),
+          isTrue,
+          reason: '$branch should receive branch-c pulled changes',
+        );
+      }
+    },
+  );
+
+  test(
+    'syncSequentialBranches runs both-way pair merges without remote changes',
+    () async {
+      final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+      final steps = <String>[];
+      await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+      final result = await git.syncSequentialBranches(
+        repoPath: fixture.repoDir.path,
+        startBranch: 'branch-a',
+        nextBranches: ['branch-b', 'branch-c'],
+        onStep: (step) async {
+          steps.add('${step.fromBranch}->${step.toBranch}');
+        },
+      );
+
+      expect(result.success, isTrue, reason: result.summary);
+      expect(steps, [
+        'branch-b->branch-a',
+        'branch-a->branch-b',
+        'branch-c->branch-b',
+        'branch-b->branch-c',
+        'branch-c->branch-b',
+        'branch-b->branch-c',
+        'branch-b->branch-a',
+        'branch-a->branch-b',
+      ]);
+      for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
+        await _runGit(['switch', branch], fixture.repoDir.path);
+        expect(
+          await File(
+            '${fixture.repoDir.path}${Platform.pathSeparator}b.txt',
+          ).exists(),
+          isTrue,
+          reason: '$branch should receive branch-b changes',
+        );
+        expect(
+          await File(
+            '${fixture.repoDir.path}${Platform.pathSeparator}c.txt',
+          ).exists(),
+          isTrue,
+          reason: '$branch should receive branch-c changes through pair sync',
+        );
+      }
+    },
+  );
+}
+
+Future<_ThreeBranchFixture> _createThreeBranchRemoteRepo(
+  Directory tempDir,
+) async {
+  final repoDir = await Directory(
+    '${tempDir.path}${Platform.pathSeparator}repo',
+  ).create();
+  final remoteDir = '${tempDir.path}${Platform.pathSeparator}remote.git';
+  final otherDir = '${tempDir.path}${Platform.pathSeparator}other-clone';
+
+  await _runGit(['init', '--bare', remoteDir], tempDir.path);
+  await _runGit(['init', '-b', 'branch-a', '.'], repoDir.path);
+  await _configureUser(repoDir.path);
+  await File(
+    '${repoDir.path}${Platform.pathSeparator}a.txt',
+  ).writeAsString('a');
+  await _runGit(['add', 'a.txt'], repoDir.path);
+  await _runGit(['commit', '-m', 'A branch'], repoDir.path);
+  await _runGit(['remote', 'add', 'origin', remoteDir], repoDir.path);
+  await _runGit(['push', '-u', 'origin', 'branch-a'], repoDir.path);
+
+  await _runGit(['switch', '-c', 'branch-b'], repoDir.path);
+  await File(
+    '${repoDir.path}${Platform.pathSeparator}b.txt',
+  ).writeAsString('b');
+  await _runGit(['add', 'b.txt'], repoDir.path);
+  await _runGit(['commit', '-m', 'B branch'], repoDir.path);
+  await _runGit(['push', '-u', 'origin', 'branch-b'], repoDir.path);
+
+  await _runGit(['switch', 'branch-a'], repoDir.path);
+  await _runGit(['switch', '-c', 'branch-c'], repoDir.path);
+  await File(
+    '${repoDir.path}${Platform.pathSeparator}c.txt',
+  ).writeAsString('c');
+  await _runGit(['add', 'c.txt'], repoDir.path);
+  await _runGit(['commit', '-m', 'C branch'], repoDir.path);
+  await _runGit(['push', '-u', 'origin', 'branch-c'], repoDir.path);
+  await _runGit(['switch', 'branch-a'], repoDir.path);
+  await _runGit(['symbolic-ref', 'HEAD', 'refs/heads/branch-a'], remoteDir);
+
+  await _runGit(['clone', remoteDir, otherDir], tempDir.path);
+  await _configureUser(otherDir);
+  await _runGit(['switch', 'branch-b'], otherDir);
+  await _runGit(['switch', 'branch-c'], otherDir);
+
+  return _ThreeBranchFixture(
+    repoDir: repoDir,
+    remoteDir: remoteDir,
+    otherDir: otherDir,
+  );
+}
+
+Future<void> _configureUser(String workingDirectory) async {
+  await _runGit(['config', 'user.email', 'test@example.com'], workingDirectory);
+  await _runGit(['config', 'user.name', 'Test User'], workingDirectory);
+}
+
+class _ThreeBranchFixture {
+  const _ThreeBranchFixture({
+    required this.repoDir,
+    required this.remoteDir,
+    required this.otherDir,
+  });
+
+  final Directory repoDir;
+  final String remoteDir;
+  final String otherDir;
 }
 
 Future<_ProcessOutput> _runGit(
