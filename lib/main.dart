@@ -71,6 +71,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   final _currentBranches = <String, String>{};
   final _commitHistory = <String, List<CommitHistoryEntry>>{};
   final _currentChangedFiles = <String, List<String>>{};
+  final _visibleCommitDrafts = <String, CommitDraft>{};
+  final _lastCommitDrafts = <String, CommitDraft>{};
   RepositoryInfo? _selectedRepo;
   var _loading = true;
   var _busy = false;
@@ -78,12 +80,15 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   var _cardSize = 360.0;
   var _autoCheckUpdates = true;
   var _darkMode = false;
+  var _leftPanelCollapsed = false;
+  var _rightPanelCollapsed = false;
   var _checkingUpdates = false;
   String? _message;
   String? _updateError;
   ReleaseInfo? _latestRelease;
   SyncAnimationState? _syncAnimation;
   Timer? _autoRefreshTimer;
+  var _commitDraftRevision = 0;
 
   @override
   void initState() {
@@ -198,8 +203,54 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         files: files,
       );
       await _recordOperation(result);
+      if (result.success) {
+        _rememberCommittedDraft(repo.id, currentBranch, message, description);
+      }
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
+    });
+  }
+
+  String _commitDraftKey(String repoId, String branchName) =>
+      '$repoId::$branchName';
+
+  void _rememberCommittedDraft(
+    String repoId,
+    String branchName,
+    String message,
+    String description,
+  ) {
+    final key = _commitDraftKey(repoId, branchName);
+    setState(() {
+      _lastCommitDrafts[key] = CommitDraft(
+        message: message,
+        description: description,
+      );
+      _visibleCommitDrafts.remove(key);
+      _commitDraftRevision++;
+    });
+  }
+
+  void _restoreCommittedDraft(String repoId, String branchName) {
+    final key = _commitDraftKey(repoId, branchName);
+    final draft = _lastCommitDrafts[key];
+    if (draft == null) return;
+    setState(() {
+      _visibleCommitDrafts[key] = draft;
+      _commitDraftRevision++;
+    });
+  }
+
+  void _clearCommittedDraft(String repoId, String branchName) {
+    final key = _commitDraftKey(repoId, branchName);
+    if (!_lastCommitDrafts.containsKey(key) &&
+        !_visibleCommitDrafts.containsKey(key)) {
+      return;
+    }
+    setState(() {
+      _lastCommitDrafts.remove(key);
+      _visibleCommitDrafts.remove(key);
+      _commitDraftRevision++;
     });
   }
 
@@ -613,6 +664,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         branchName: branch.branchName,
       );
       await _recordOperation(result);
+      if (result.success) {
+        _clearCommittedDraft(repo.id, branch.branchName);
+      }
       final upstream = await _git.upstreamFor(repo.path, branch.branchName);
       final status = await _git.getBranchStatus(repo.path, upstream);
       _replaceBranch(branch.copyWith(upstream: upstream, lastStatus: status));
@@ -683,6 +737,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         branchName: branch.branchName,
       );
       await _recordOperation(result);
+      if (result.success) {
+        _restoreCommittedDraft(repo.id, branch.branchName);
+      }
       await _refreshTrackedBranches(repo);
     });
   }
@@ -702,8 +759,18 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       if (!mounted) return;
       final request = await showDialog<CommitRequest>(
         context: context,
-        builder: (_) =>
-            CommitDialog(branchName: branch.branchName, files: files),
+        builder: (_) => CommitDialog(
+          branchName: branch.branchName,
+          files: files,
+          initialMessage:
+              _visibleCommitDrafts[_commitDraftKey(repo.id, branch.branchName)]
+                  ?.message ??
+              '',
+          initialDescription:
+              _visibleCommitDrafts[_commitDraftKey(repo.id, branch.branchName)]
+                  ?.description ??
+              '',
+        ),
       );
       if (request == null) return;
       final result = await _git.commitBranch(
@@ -714,6 +781,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         files: request.files,
       );
       await _recordOperation(result);
+      if (result.success) {
+        _rememberCommittedDraft(
+          repo.id,
+          branch.branchName,
+          request.message,
+          request.description,
+        );
+      }
       await _refreshBranch(branch);
     });
   }
@@ -1094,6 +1169,12 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                               _commitHistory[selectedRepo.id] ?? const [],
                           currentChangedFiles:
                               _currentChangedFiles[selectedRepo.id] ?? const [],
+                          currentCommitDraft:
+                              _visibleCommitDrafts[_commitDraftKey(
+                                selectedRepo.id,
+                                currentBranch,
+                              )],
+                          commitDraftRevision: _commitDraftRevision,
                           repositories: _repositories,
                           branches: selectedBranches,
                           operations: _operations,
@@ -1106,6 +1187,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           updateError: _updateError,
                           syncAnimation: _syncAnimation,
                           checkoutBlocked: checkoutBlocked,
+                          leftPanelCollapsed: _leftPanelCollapsed,
+                          rightPanelCollapsed: _rightPanelCollapsed,
                           cardSize: _cardSize,
                           onChooseFolder: _chooseRepository,
                           onChangeRepo: (repo) {
@@ -1119,6 +1202,12 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           onOpenGithubProfile: _openGithubProfile,
                           onAutoCheckUpdatesChanged: _setAutoCheckUpdates,
                           onDarkModeChanged: _setDarkMode,
+                          onToggleLeftPanel: () => setState(
+                            () => _leftPanelCollapsed = !_leftPanelCollapsed,
+                          ),
+                          onToggleRightPanel: () => setState(
+                            () => _rightPanelCollapsed = !_rightPanelCollapsed,
+                          ),
                           onEditBranches: () => _selectBranches(selectedRepo),
                           onRefresh: _refreshBranch,
                           onPull: _pullBranch,
@@ -1264,6 +1353,8 @@ class RepositoryDashboard extends StatelessWidget {
     required this.currentBranch,
     required this.currentBranchHistory,
     required this.currentChangedFiles,
+    required this.currentCommitDraft,
+    required this.commitDraftRevision,
     required this.repositories,
     required this.branches,
     required this.operations,
@@ -1276,6 +1367,8 @@ class RepositoryDashboard extends StatelessWidget {
     required this.updateError,
     required this.syncAnimation,
     required this.checkoutBlocked,
+    required this.leftPanelCollapsed,
+    required this.rightPanelCollapsed,
     required this.cardSize,
     required this.onChooseFolder,
     required this.onChangeRepo,
@@ -1286,6 +1379,8 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onOpenGithubProfile,
     required this.onAutoCheckUpdatesChanged,
     required this.onDarkModeChanged,
+    required this.onToggleLeftPanel,
+    required this.onToggleRightPanel,
     required this.onEditBranches,
     required this.onRefresh,
     required this.onPull,
@@ -1305,6 +1400,8 @@ class RepositoryDashboard extends StatelessWidget {
   final String currentBranch;
   final List<CommitHistoryEntry> currentBranchHistory;
   final List<String> currentChangedFiles;
+  final CommitDraft? currentCommitDraft;
+  final int commitDraftRevision;
   final List<RepositoryInfo> repositories;
   final List<TrackedBranch> branches;
   final List<GitOperationResult> operations;
@@ -1317,6 +1414,8 @@ class RepositoryDashboard extends StatelessWidget {
   final String? updateError;
   final SyncAnimationState? syncAnimation;
   final bool checkoutBlocked;
+  final bool leftPanelCollapsed;
+  final bool rightPanelCollapsed;
   final double cardSize;
   final VoidCallback onChooseFolder;
   final ValueChanged<RepositoryInfo> onChangeRepo;
@@ -1327,6 +1426,8 @@ class RepositoryDashboard extends StatelessWidget {
   final VoidCallback onOpenGithubProfile;
   final ValueChanged<bool> onAutoCheckUpdatesChanged;
   final ValueChanged<bool> onDarkModeChanged;
+  final VoidCallback onToggleLeftPanel;
+  final VoidCallback onToggleRightPanel;
   final VoidCallback onEditBranches;
   final ValueChanged<TrackedBranch> onRefresh;
   final ValueChanged<TrackedBranch> onPull;
@@ -1361,11 +1462,18 @@ class RepositoryDashboard extends StatelessWidget {
           children: [
             SizedBox(
               height: panelHeight,
-              child: CurrentBranchHistoryPanel(
-                width: sidePanelWidth,
-                branchName: currentBranch,
-                commits: currentBranchHistory,
-              ),
+              child: leftPanelCollapsed
+                  ? CollapsedSidePanel(
+                      tooltip: 'Show branch history',
+                      icon: Icons.history,
+                      onExpand: onToggleLeftPanel,
+                    )
+                  : CurrentBranchHistoryPanel(
+                      width: sidePanelWidth,
+                      branchName: currentBranch,
+                      commits: currentBranchHistory,
+                      onCollapse: onToggleLeftPanel,
+                    ),
             ),
             SizedBox(width: gap),
             Expanded(
@@ -1549,15 +1657,24 @@ class RepositoryDashboard extends StatelessWidget {
             SizedBox(width: gap),
             SizedBox(
               height: panelHeight,
-              child: CurrentChangesPanel(
-                width: sidePanelWidth,
-                branchName: currentBranch,
-                files: currentChangedFiles,
-                busy: busy,
-                onOpenDiff: onShowFileDiff,
-                onCommitFiles: onCommitFiles,
-                onDiscardFiles: onDiscardFiles,
-              ),
+              child: rightPanelCollapsed
+                  ? CollapsedSidePanel(
+                      tooltip: 'Show uncommitted files',
+                      icon: Icons.difference_outlined,
+                      onExpand: onToggleRightPanel,
+                    )
+                  : CurrentChangesPanel(
+                      width: sidePanelWidth,
+                      branchName: currentBranch,
+                      files: currentChangedFiles,
+                      commitDraft: currentCommitDraft,
+                      commitDraftRevision: commitDraftRevision,
+                      busy: busy,
+                      onOpenDiff: onShowFileDiff,
+                      onCommitFiles: onCommitFiles,
+                      onDiscardFiles: onDiscardFiles,
+                      onCollapse: onToggleRightPanel,
+                    ),
             ),
           ],
         );
@@ -1796,12 +1913,14 @@ class CurrentBranchHistoryPanel extends StatelessWidget {
     required this.width,
     required this.branchName,
     required this.commits,
+    required this.onCollapse,
     super.key,
   });
 
   final double width;
   final String branchName;
   final List<CommitHistoryEntry> commits;
+  final VoidCallback onCollapse;
 
   @override
   Widget build(BuildContext context) {
@@ -1850,6 +1969,11 @@ class CurrentBranchHistoryPanel extends StatelessWidget {
                       ),
                     ],
                   ),
+                ),
+                IconButton(
+                  tooltip: 'Collapse history',
+                  onPressed: onCollapse,
+                  icon: const Icon(Icons.keyboard_double_arrow_left),
                 ),
               ],
             ),
@@ -1986,26 +2110,77 @@ class CommitHistoryTile extends StatelessWidget {
   }
 }
 
+class CollapsedSidePanel extends StatelessWidget {
+  const CollapsedSidePanel({
+    required this.tooltip,
+    required this.icon,
+    required this.onExpand,
+    super.key,
+  });
+
+  final String tooltip;
+  final IconData icon;
+  final VoidCallback onExpand;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 44,
+      decoration: BoxDecoration(
+        color: surfaceColor(context),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: borderColor(context)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0F0B1B3B),
+            blurRadius: 20,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: const EdgeInsets.only(top: 10),
+          child: Tooltip(
+            message: tooltip,
+            child: IconButton(
+              onPressed: onExpand,
+              icon: Icon(icon, color: const Color(0xFF5865F2), size: 18),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class CurrentChangesPanel extends StatefulWidget {
   const CurrentChangesPanel({
     required this.width,
     required this.branchName,
     required this.files,
+    required this.commitDraft,
+    required this.commitDraftRevision,
     required this.busy,
     required this.onOpenDiff,
     required this.onCommitFiles,
     required this.onDiscardFiles,
+    required this.onCollapse,
     super.key,
   });
 
   final double width;
   final String branchName;
   final List<String> files;
+  final CommitDraft? commitDraft;
+  final int commitDraftRevision;
   final bool busy;
   final ValueChanged<String> onOpenDiff;
   final void Function(List<String> files, String message, String description)
   onCommitFiles;
   final ValueChanged<List<String>> onDiscardFiles;
+  final VoidCallback onCollapse;
 
   @override
   State<CurrentChangesPanel> createState() => _CurrentChangesPanelState();
@@ -2026,6 +2201,11 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
   @override
   void didUpdateWidget(covariant CurrentChangesPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.branchName != widget.branchName ||
+        oldWidget.commitDraftRevision != widget.commitDraftRevision) {
+      _messageController.text = widget.commitDraft?.message ?? '';
+      _descriptionController.text = widget.commitDraft?.description ?? '';
+    }
     final currentFiles = widget.files.toSet();
     _selectedFiles = _selectedFiles
         .where((file) => currentFiles.contains(file))
@@ -2149,6 +2329,11 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
                       ),
                     ],
                   ),
+                ),
+                IconButton(
+                  tooltip: 'Collapse uncommitted files',
+                  onPressed: widget.onCollapse,
+                  icon: const Icon(Icons.keyboard_double_arrow_right),
                 ),
               ],
             ),
@@ -4150,6 +4335,7 @@ class CommitDialog extends StatefulWidget {
     this.intro,
     this.actionLabel = 'Commit',
     this.initialMessage = '',
+    this.initialDescription = '',
     super.key,
   });
 
@@ -4159,6 +4345,7 @@ class CommitDialog extends StatefulWidget {
   final String? intro;
   final String actionLabel;
   final String initialMessage;
+  final String initialDescription;
 
   @override
   State<CommitDialog> createState() => _CommitDialogState();
@@ -4173,6 +4360,7 @@ class _CommitDialogState extends State<CommitDialog> {
   void initState() {
     super.initState();
     _controller.text = widget.initialMessage;
+    _descriptionController.text = widget.initialDescription;
   }
 
   @override
@@ -4270,6 +4458,13 @@ class CommitRequest {
   const CommitRequest(this.message, this.files, {this.description = ''});
   final String message;
   final List<String> files;
+  final String description;
+}
+
+class CommitDraft {
+  const CommitDraft({required this.message, required this.description});
+
+  final String message;
   final String description;
 }
 
