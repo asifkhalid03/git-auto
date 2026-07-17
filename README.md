@@ -1,4 +1,8 @@
-# Git Auto
+<p align="center">
+  <img src="docs/images/git-flow-logo.png" alt="Git Flow logo" width="96">
+</p>
+
+# Git Flow
 
 Flutter desktop app for managing local Git repositories across selected branches.
 
@@ -34,7 +38,9 @@ Flutter desktop app for managing local Git repositories across selected branches
 
 A Windows x64 release build is included:
 
-[releases/automation_git_workflow_windows_x64_release.zip](releases/automation_git_workflow_windows_x64_release.zip)
+[releases/GitFlowSetup-v1.0.12.exe](releases/GitFlowSetup-v1.0.12.exe)
+
+[releases/git_flow_windows_x64_release.zip](releases/git_flow_windows_x64_release.zip)
 
 ## Development
 

@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const appVersion = '1.0.11';
+const appVersion = '1.0.12';
 
 class UpdateDownloadProgress {
   const UpdateDownloadProgress({
@@ -48,6 +48,11 @@ class ReleaseInfo {
     candidates.sort((a, b) {
       int score(ReleaseAsset asset) {
         final name = asset.name.toLowerCase();
+        if (Platform.isWindows &&
+            name.endsWith('.exe') &&
+            (name.contains('setup') || name.contains('installer'))) {
+          return 0;
+        }
         if (Platform.isWindows && name.endsWith('.msi')) return 0;
         if (Platform.isWindows &&
             name.endsWith('.zip') &&
@@ -106,7 +111,7 @@ class UpdateService {
       );
       request.headers.set(
         HttpHeaders.userAgentHeader,
-        'Git Auto update checker',
+        'Git Flow update checker',
       );
       request.headers.set(
         HttpHeaders.acceptHeader,
@@ -146,7 +151,7 @@ class UpdateService {
       final request = await client.getUrl(Uri.parse(asset.downloadUrl));
       request.headers.set(
         HttpHeaders.userAgentHeader,
-        'Git Auto update downloader',
+        'Git Flow update downloader',
       );
       final response = await request.close();
       if (response.statusCode < 200 || response.statusCode >= 300) {

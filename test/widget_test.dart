@@ -1,6 +1,6 @@
-import 'package:automation_git_workflow/main.dart';
-import 'package:automation_git_workflow/models.dart';
-import 'package:automation_git_workflow/update_service.dart';
+import 'package:git_flow/main.dart';
+import 'package:git_flow/models.dart';
+import 'package:git_flow/update_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 

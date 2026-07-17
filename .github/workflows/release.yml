@@ -22,5 +22,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            releases/automation_git_workflow.exe
-            releases/automation_git_workflow_windows_x64_release.zip
+            releases/git_flow.exe
+            releases/git_flow_windows_x64_release.zip
+            releases/GitFlowSetup-*.exe

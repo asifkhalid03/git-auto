@@ -27,7 +27,7 @@ class GitWorkflowApp extends StatelessWidget {
       builder: (context, mode, child) {
         return MaterialApp(
           debugShowCheckedModeBanner: false,
-          title: 'Git Workflow',
+          title: 'Git Flow',
           themeMode: mode,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
@@ -433,7 +433,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       }
 
       final exe = File(
-        '${targetDir.path}${Platform.pathSeparator}automation_git_workflow.exe',
+        '${targetDir.path}${Platform.pathSeparator}git_flow.exe',
       );
       if (await exe.exists()) {
         await _launchUpdatedAppAndExit(exe);

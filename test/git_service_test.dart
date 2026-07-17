@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:automation_git_workflow/git_service.dart';
+import 'package:git_flow/git_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
