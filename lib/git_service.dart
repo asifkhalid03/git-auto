@@ -596,6 +596,122 @@ class GitService {
     );
   }
 
+  Future<GitOperationResult> pullSelectedBranches({
+    required String repoPath,
+    required String startBranch,
+    required List<String> branchNames,
+  }) async {
+    final startedAt = DateTime.now();
+    final branches = [
+      for (final branch in branchNames)
+        if (branch.trim().isNotEmpty) branch.trim(),
+    ];
+    if (branches.isEmpty) {
+      return _manualFailure(
+        'pull selected',
+        startBranch,
+        'Select at least one branch to pull.',
+        startedAt,
+      );
+    }
+
+    var combined = _GitProcessResult(exitCode: 0, stdout: '', stderr: '');
+
+    Future<bool> checkoutClean(String branch) async {
+      final checkout = await checkoutBranch(
+        repoPath: repoPath,
+        branchName: branch,
+      );
+      combined = _combine(
+        combined,
+        _GitProcessResult(
+          exitCode: checkout.success ? 0 : 1,
+          stdout: checkout.stdout,
+          stderr: checkout.stderr,
+        ),
+      );
+      if (!checkout.success) return false;
+
+      final status = await getBranchStatus(repoPath, '', fetch: false);
+      if (status.hasConflicts) {
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr: 'Resolve conflicts on $branch before pulling branches.',
+          ),
+        );
+        return false;
+      }
+      if (status.hasLocalChanges) {
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr:
+                'Commit, stash, or discard local changes on $branch before pulling branches.',
+          ),
+        );
+        return false;
+      }
+      return true;
+    }
+
+    for (final branch in branches) {
+      if (!await checkoutClean(branch)) {
+        await checkoutBranch(repoPath: repoPath, branchName: startBranch);
+        return _resultFromProcess('pull selected', branch, combined, startedAt);
+      }
+      final upstream = await upstreamFor(repoPath, branch);
+      if (upstream.isEmpty) {
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr: 'No upstream configured for $branch.',
+          ),
+        );
+        await checkoutBranch(repoPath: repoPath, branchName: startBranch);
+        return _resultFromProcess('pull selected', branch, combined, startedAt);
+      }
+      final pull = await pullBranch(repoPath, upstream);
+      combined = _combine(
+        combined,
+        _GitProcessResult(
+          exitCode: pull.success ? 0 : 1,
+          stdout: pull.stdout,
+          stderr: pull.stderr,
+        ),
+      );
+      if (!pull.success) {
+        await checkoutBranch(repoPath: repoPath, branchName: startBranch);
+        return _resultFromProcess('pull selected', branch, combined, startedAt);
+      }
+    }
+
+    final restore = await checkoutBranch(
+      repoPath: repoPath,
+      branchName: startBranch,
+    );
+    combined = _combine(
+      combined,
+      _GitProcessResult(
+        exitCode: restore.success ? 0 : 1,
+        stdout: restore.stdout,
+        stderr: restore.stderr,
+      ),
+    );
+    return _resultFromProcess(
+      'pull selected',
+      startBranch,
+      combined,
+      startedAt,
+    );
+  }
+
   Future<List<String>> changedFiles(String worktreePath) async {
     final result = await _run(['status', '--porcelain=v1'], worktreePath);
     _throwIfFailed(result, 'Unable to read changed files.');
@@ -641,6 +757,7 @@ class GitService {
     required String message,
     required List<String> files,
     String description = '',
+    bool amend = false,
   }) async {
     final startedAt = DateTime.now();
     if (message.trim().isEmpty) {
@@ -672,7 +789,7 @@ class GitService {
     if (!add.success) {
       return _resultFromProcess('commit', branchName, add, startedAt);
     }
-    final args = ['commit', '-m', message.trim()];
+    final args = ['commit', if (amend) '--amend', '-m', message.trim()];
     if (description.trim().isNotEmpty) {
       args.addAll(['-m', description.trim()]);
     }

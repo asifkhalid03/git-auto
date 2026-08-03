@@ -465,6 +465,106 @@ void main() {
       }
     },
   );
+
+  test('commitBranch can amend the latest commit', () async {
+    final repoDir = await Directory(
+      '${tempDir.path}${Platform.pathSeparator}repo',
+    ).create();
+
+    await _runGit(['init', '-b', 'main', '.'], repoDir.path);
+    await _configureUser(repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}file.txt',
+    ).writeAsString('first');
+    await _runGit(['add', 'file.txt'], repoDir.path);
+    await _runGit(['commit', '-m', 'Initial'], repoDir.path);
+
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}file.txt',
+    ).writeAsString('first\nsecond');
+    final result = await git.commitBranch(
+      worktreePath: repoDir.path,
+      branchName: 'main',
+      message: 'Initial amended',
+      description: 'Extra details',
+      files: ['file.txt'],
+      amend: true,
+    );
+    final count = await _runGit(['rev-list', '--count', 'HEAD'], repoDir.path);
+    final message = await _runGit(['log', '-1', '--pretty=%B'], repoDir.path);
+
+    expect(result.success, isTrue, reason: result.summary);
+    expect(count.stdout.trim(), '1');
+    expect(message.stdout, contains('Initial amended'));
+    expect(message.stdout, contains('Extra details'));
+  });
+
+  test(
+    'pullSelectedBranches pulls each selected branch and restores start branch',
+    () async {
+      final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+      await _runGit(['switch', 'branch-b'], fixture.otherDir);
+      await File(
+        '${fixture.otherDir}${Platform.pathSeparator}remote-b-pull.txt',
+      ).writeAsString('remote b');
+      await _runGit(['add', 'remote-b-pull.txt'], fixture.otherDir);
+      await _runGit(['commit', '-m', 'Remote B pull'], fixture.otherDir);
+      await _runGit(['push'], fixture.otherDir);
+
+      await _runGit(['switch', 'branch-c'], fixture.otherDir);
+      await File(
+        '${fixture.otherDir}${Platform.pathSeparator}remote-c-pull.txt',
+      ).writeAsString('remote c');
+      await _runGit(['add', 'remote-c-pull.txt'], fixture.otherDir);
+      await _runGit(['commit', '-m', 'Remote C pull'], fixture.otherDir);
+      await _runGit(['push'], fixture.otherDir);
+
+      await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+      final result = await git.pullSelectedBranches(
+        repoPath: fixture.repoDir.path,
+        startBranch: 'branch-a',
+        branchNames: ['branch-a', 'branch-b', 'branch-c'],
+      );
+
+      expect(result.success, isTrue, reason: result.summary);
+      expect(await git.currentBranch(fixture.repoDir.path), 'branch-a');
+
+      await _runGit(['switch', 'branch-b'], fixture.repoDir.path);
+      expect(
+        await File(
+          '${fixture.repoDir.path}${Platform.pathSeparator}remote-b-pull.txt',
+        ).exists(),
+        isTrue,
+      );
+      await _runGit(['switch', 'branch-c'], fixture.repoDir.path);
+      expect(
+        await File(
+          '${fixture.repoDir.path}${Platform.pathSeparator}remote-c-pull.txt',
+        ).exists(),
+        isTrue,
+      );
+    },
+  );
+
+  test('pullSelectedBranches blocks dirty current branch', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    await File(
+      '${fixture.repoDir.path}${Platform.pathSeparator}dirty.txt',
+    ).writeAsString('dirty');
+
+    final result = await git.pullSelectedBranches(
+      repoPath: fixture.repoDir.path,
+      startBranch: 'branch-a',
+      branchNames: ['branch-a', 'branch-b'],
+    );
+
+    expect(result.success, isFalse);
+    expect(result.summary, contains('local changes on branch-a'));
+    expect(await git.currentBranch(fixture.repoDir.path), 'branch-a');
+  });
 }
 
 Future<_ThreeBranchFixture> _createThreeBranchRemoteRepo(

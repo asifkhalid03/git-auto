@@ -192,6 +192,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     List<String> files,
     String message,
     String description,
+    bool amend,
   ) async {
     await _guarded(() async {
       final currentBranch = await _refreshCurrentBranch(repo);
@@ -201,6 +202,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         message: message,
         description: description,
         files: files,
+        amend: amend,
       );
       await _recordOperation(result);
       if (result.success) {
@@ -209,6 +211,52 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
     });
+  }
+
+  Future<void> _removeRepository(RepositoryInfo repo) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Remove workspace?'),
+        content: Text(
+          'Remove ${repo.name} from Git Flow? This only removes the saved workspace. The local repository folder will not be deleted.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    setState(() {
+      _repositories = _repositories
+          .where((item) => item.id != repo.id)
+          .toList();
+      _branches = _branches
+          .where((branch) => branch.repoId != repo.id)
+          .toList();
+      _operations = _operations
+          .where((op) => op.branchName.isEmpty || op.branchName != repo.name)
+          .toList();
+      _currentBranches.remove(repo.id);
+      _commitHistory.remove(repo.id);
+      _currentChangedFiles.remove(repo.id);
+      _selectedRepo = _repositories.firstOrNull;
+      _message = '${repo.name} removed from workspaces.';
+    });
+    await _save();
+    final next = _selectedRepo;
+    if (next != null) {
+      unawaited(_refreshCurrentBranch(next));
+    }
   }
 
   String _commitDraftKey(String repoId, String branchName) =>
@@ -779,6 +827,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         message: request.message,
         description: request.description,
         files: request.files,
+        amend: request.amend,
       );
       await _recordOperation(result);
       if (result.success) {
@@ -853,6 +902,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           message: commitRequest.message,
           description: commitRequest.description,
           files: commitRequest.files,
+          amend: commitRequest.amend,
         );
         await _recordOperation(commitResult);
         await _refreshTrackedBranches(repo);
@@ -941,6 +991,81 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           setState(() => _syncAnimation = null);
         }
       }
+    });
+  }
+
+  Future<void> _pullSelectedBranches(
+    RepositoryInfo repo,
+    List<TrackedBranch> branches,
+  ) async {
+    if (branches.isEmpty) {
+      setState(() => _message = 'Select at least one branch to pull.');
+      return;
+    }
+
+    await _guarded(() async {
+      final currentBranch = await _refreshCurrentBranch(repo);
+      final activeUpstream = await _git.upstreamFor(repo.path, currentBranch);
+      final activeStatus = await _git.getBranchStatus(
+        repo.path,
+        activeUpstream,
+        fetch: false,
+      );
+      if (activeStatus.hasConflicts) {
+        setState(() {
+          _message = 'Resolve conflicts on $currentBranch before pulling.';
+        });
+        return;
+      }
+      if (activeStatus.hasLocalChanges) {
+        final files = await _git.changedFiles(repo.path);
+        if (!mounted) return;
+        final commitRequest = await showDialog<CommitRequest>(
+          context: context,
+          builder: (_) => CommitDialog(
+            branchName: currentBranch,
+            files: files,
+            title: 'Commit changes before pull',
+            intro:
+                'Pull selected branches needs a clean current branch. Commit these changes first.',
+            actionLabel: 'Commit And Pull',
+            initialMessage: 'Save $currentBranch changes',
+          ),
+        );
+        if (commitRequest == null) {
+          setState(() {
+            _message = 'Pull cancelled: local changes were not committed.';
+          });
+          return;
+        }
+        final commitResult = await _git.commitBranch(
+          worktreePath: repo.path,
+          branchName: currentBranch,
+          message: commitRequest.message,
+          description: commitRequest.description,
+          files: commitRequest.files,
+          amend: commitRequest.amend,
+        );
+        await _recordOperation(commitResult);
+        if (!commitResult.success) {
+          await _refreshTrackedBranches(repo);
+          return;
+        }
+      }
+
+      final result = await _git.pullSelectedBranches(
+        repoPath: repo.path,
+        startBranch: currentBranch,
+        branchNames: branches.map((branch) => branch.branchName).toList(),
+      );
+      await _recordOperation(result);
+      await _refreshCurrentBranch(repo);
+      await _refreshTrackedBranches(repo);
+      setState(() {
+        _message = result.success
+            ? 'Pulled selected branches. Switched back to $currentBranch.'
+            : 'Pull selected failed: ${result.branchName} - ${result.summary}';
+      });
     });
   }
 
@@ -1191,6 +1316,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           rightPanelCollapsed: _rightPanelCollapsed,
                           cardSize: _cardSize,
                           onChooseFolder: _chooseRepository,
+                          onRemoveRepo: () => _removeRepository(selectedRepo),
                           onChangeRepo: (repo) {
                             setState(() => _selectedRepo = repo);
                             unawaited(_refreshCurrentBranch(repo));
@@ -1209,6 +1335,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                             () => _rightPanelCollapsed = !_rightPanelCollapsed,
                           ),
                           onEditBranches: () => _selectBranches(selectedRepo),
+                          onPullSelected: () => _pullSelectedBranches(
+                            selectedRepo,
+                            selectedBranches,
+                          ),
                           onRefresh: _refreshBranch,
                           onPull: _pullBranch,
                           onCheckout: _checkoutBranch,
@@ -1217,12 +1347,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           onUndoCommit: _undoLastCommit,
                           onShowFileDiff: (file) =>
                               _showCurrentFileDiff(selectedRepo, file),
-                          onCommitFiles: (files, message, description) =>
+                          onCommitFiles: (files, message, description, amend) =>
                               _commitCurrentFiles(
                                 selectedRepo,
                                 files,
                                 message,
                                 description,
+                                amend,
                               ),
                           onDiscardFiles: (files) =>
                               _discardCurrentFiles(selectedRepo, files),
@@ -1371,6 +1502,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.rightPanelCollapsed,
     required this.cardSize,
     required this.onChooseFolder,
+    required this.onRemoveRepo,
     required this.onChangeRepo,
     required this.onCardSizeChanged,
     required this.onCheckUpdates,
@@ -1382,6 +1514,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onToggleLeftPanel,
     required this.onToggleRightPanel,
     required this.onEditBranches,
+    required this.onPullSelected,
     required this.onRefresh,
     required this.onPull,
     required this.onCheckout,
@@ -1418,6 +1551,7 @@ class RepositoryDashboard extends StatelessWidget {
   final bool rightPanelCollapsed;
   final double cardSize;
   final VoidCallback onChooseFolder;
+  final VoidCallback onRemoveRepo;
   final ValueChanged<RepositoryInfo> onChangeRepo;
   final ValueChanged<double> onCardSizeChanged;
   final VoidCallback onCheckUpdates;
@@ -1429,6 +1563,7 @@ class RepositoryDashboard extends StatelessWidget {
   final VoidCallback onToggleLeftPanel;
   final VoidCallback onToggleRightPanel;
   final VoidCallback onEditBranches;
+  final VoidCallback onPullSelected;
   final ValueChanged<TrackedBranch> onRefresh;
   final ValueChanged<TrackedBranch> onPull;
   final ValueChanged<TrackedBranch> onCheckout;
@@ -1436,7 +1571,12 @@ class RepositoryDashboard extends StatelessWidget {
   final ValueChanged<TrackedBranch> onPush;
   final ValueChanged<TrackedBranch> onUndoCommit;
   final ValueChanged<String> onShowFileDiff;
-  final void Function(List<String> files, String message, String description)
+  final void Function(
+    List<String> files,
+    String message,
+    String description,
+    bool amend,
+  )
   onCommitFiles;
   final ValueChanged<List<String>> onDiscardFiles;
   final void Function(TrackedBranch from, TrackedBranch to) onSwapBranches;
@@ -1550,6 +1690,12 @@ class RepositoryDashboard extends StatelessWidget {
                             icon: const Icon(Icons.add),
                             label: const Text('Add Repo'),
                           ),
+                          const SizedBox(width: 8),
+                          IconButton.outlined(
+                            tooltip: 'Remove workspace',
+                            onPressed: busy ? null : onRemoveRepo,
+                            icon: const Icon(Icons.delete_outline),
+                          ),
                         ],
                       ),
                       const SizedBox(height: 18),
@@ -1574,6 +1720,13 @@ class RepositoryDashboard extends StatelessWidget {
                               BranchCardSizeSlider(
                                 value: cardSize,
                                 onChanged: busy ? null : onCardSizeChanged,
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: busy || branches.isEmpty
+                                    ? null
+                                    : onPullSelected,
+                                icon: const Icon(Icons.download),
+                                label: const Text('Pull Selected'),
                               ),
                               OutlinedButton.icon(
                                 onPressed: busy || branches.length < 2
@@ -2177,7 +2330,12 @@ class CurrentChangesPanel extends StatefulWidget {
   final int commitDraftRevision;
   final bool busy;
   final ValueChanged<String> onOpenDiff;
-  final void Function(List<String> files, String message, String description)
+  final void Function(
+    List<String> files,
+    String message,
+    String description,
+    bool amend,
+  )
   onCommitFiles;
   final ValueChanged<List<String>> onDiscardFiles;
   final VoidCallback onCollapse;
@@ -2191,6 +2349,7 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
   final _messageController = TextEditingController();
   final _descriptionController = TextEditingController();
   var _selectedFiles = <String>{};
+  var _amendLastCommit = false;
 
   @override
   void initState() {
@@ -2249,6 +2408,7 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
       _selectedFiles.toList(),
       _messageController.text,
       _descriptionController.text,
+      _amendLastCommit,
     );
   }
 
@@ -2451,6 +2611,19 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
                     labelText: 'Description',
                     border: OutlineInputBorder(),
                   ),
+                ),
+                const SizedBox(height: 6),
+                CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: _amendLastCommit,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Append to last commit'),
+                  subtitle: const Text('Uses git commit --amend'),
+                  onChanged: widget.busy
+                      ? null
+                      : (value) =>
+                            setState(() => _amendLastCommit = value ?? false),
                 ),
                 const SizedBox(height: 10),
                 Row(
@@ -4355,6 +4528,7 @@ class _CommitDialogState extends State<CommitDialog> {
   final _controller = TextEditingController();
   final _descriptionController = TextEditingController();
   late final Set<String> _files = {...widget.files};
+  var _amendLastCommit = false;
 
   @override
   void initState() {
@@ -4429,6 +4603,18 @@ class _CommitDialogState extends State<CommitDialog> {
                   ],
                 ),
               ),
+            const SizedBox(height: 8),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              value: _amendLastCommit,
+              controlAffinity: ListTileControlAffinity.leading,
+              title: const Text('Append to last commit'),
+              subtitle: const Text('Uses git commit --amend'),
+              onChanged: (checked) {
+                setState(() => _amendLastCommit = checked ?? false);
+              },
+            ),
           ],
         ),
       ),
@@ -4445,6 +4631,7 @@ class _CommitDialogState extends State<CommitDialog> {
                     _controller.text,
                     _files.toList(),
                     description: _descriptionController.text,
+                    amend: _amendLastCommit,
                   ),
                 ),
           child: Text(widget.actionLabel),
@@ -4455,10 +4642,16 @@ class _CommitDialogState extends State<CommitDialog> {
 }
 
 class CommitRequest {
-  const CommitRequest(this.message, this.files, {this.description = ''});
+  const CommitRequest(
+    this.message,
+    this.files, {
+    this.description = '',
+    this.amend = false,
+  });
   final String message;
   final List<String> files;
   final String description;
+  final bool amend;
 }
 
 class CommitDraft {
