@@ -5,6 +5,7 @@ import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 
 import 'app_storage.dart';
@@ -549,7 +550,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
 
     if (Platform.isWindows) {
       if (file.path.toLowerCase().endsWith('.exe')) {
-        await _launchUpdatedAppAndExit(file);
+        if (_looksLikeWindowsInstaller(file.path)) {
+          await _runWindowsInstallerAndExit(file);
+        } else {
+          await _launchUpdatedAppAndExit(file);
+        }
         return;
       }
       await Process.start(file.path, [], mode: ProcessStartMode.detached);
@@ -570,6 +575,32 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       workingDirectory: File(file.path).parent.path,
     );
     await Future<void>.delayed(const Duration(milliseconds: 500));
+    exit(0);
+  }
+
+  bool _looksLikeWindowsInstaller(String path) {
+    final name = p.basename(path).toLowerCase();
+    return name.contains('setup') || name.contains('installer');
+  }
+
+  Future<void> _runWindowsInstallerAndExit(FileSystemEntity file) async {
+    final script = [
+      r'$ErrorActionPreference = "Stop"',
+      '\$installer = ${_psQuote(file.path)}',
+      '\$currentPid = $pid',
+      r'try { Wait-Process -Id $currentPid -Timeout 30 -ErrorAction SilentlyContinue } catch {}',
+      r'$args = @("/SP-", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS")',
+      r'Start-Process -FilePath $installer -ArgumentList $args',
+    ].join('; ');
+
+    await Process.start('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      script,
+    ], mode: ProcessStartMode.detached);
+    await Future<void>.delayed(const Duration(milliseconds: 250));
     exit(0);
   }
 
