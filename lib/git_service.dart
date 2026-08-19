@@ -11,6 +11,20 @@ class SyncMergeStep {
   final String toBranch;
 }
 
+class MergeConflictPreview {
+  const MergeConflictPreview({
+    required this.sourceBranch,
+    required this.targetBranch,
+    required this.conflictCount,
+    required this.files,
+  });
+
+  final String sourceBranch;
+  final String targetBranch;
+  final int conflictCount;
+  final List<String> files;
+}
+
 class GitService {
   Future<RepositoryInfo> validateRepository({
     required String path,
@@ -596,6 +610,82 @@ class GitService {
     );
   }
 
+  Future<List<MergeConflictPreview>> preflightSequentialMergeConflicts({
+    required String repoPath,
+    required String startBranch,
+    required List<String> nextBranches,
+  }) async {
+    final originalBranch = await currentBranch(repoPath);
+    final orderedBranches = [
+      startBranch.trim(),
+      for (final branch in nextBranches)
+        if (branch.trim().isNotEmpty && branch.trim() != startBranch.trim())
+          branch.trim(),
+    ];
+    if (orderedBranches.length < 2) return const [];
+
+    final previews = <MergeConflictPreview>[];
+
+    Future<void> testMerge({
+      required String target,
+      required String source,
+    }) async {
+      final checkout = await checkoutBranch(
+        repoPath: repoPath,
+        branchName: target,
+      );
+      if (!checkout.success) return;
+
+      final status = await getBranchStatus(repoPath, '', fetch: false);
+      if (status.hasConflicts || status.hasLocalChanges) return;
+
+      final revision = await _branchRevision(repoPath, source);
+      final merge = await _run([
+        'merge',
+        '--no-commit',
+        '--no-ff',
+        revision,
+      ], repoPath);
+      if (merge.success) {
+        await _run(['merge', '--abort'], repoPath);
+        return;
+      }
+
+      final conflicts = await _conflictedFiles(repoPath);
+      await _run(['merge', '--abort'], repoPath);
+      if (conflicts.isEmpty) return;
+      previews.add(
+        MergeConflictPreview(
+          sourceBranch: source,
+          targetBranch: target,
+          conflictCount: conflicts.length,
+          files: conflicts,
+        ),
+      );
+    }
+
+    try {
+      for (var index = 1; index < orderedBranches.length; index++) {
+        final previous = orderedBranches[index - 1];
+        final branch = orderedBranches[index];
+        await testMerge(target: previous, source: branch);
+        await testMerge(target: branch, source: previous);
+      }
+      for (var index = orderedBranches.length - 2; index >= 0; index--) {
+        final previous = orderedBranches[index];
+        final branch = orderedBranches[index + 1];
+        await testMerge(target: previous, source: branch);
+        await testMerge(target: branch, source: previous);
+      }
+    } finally {
+      if (originalBranch.isNotEmpty) {
+        await checkoutBranch(repoPath: repoPath, branchName: originalBranch);
+      }
+    }
+
+    return previews;
+  }
+
   Future<GitOperationResult> pullSelectedBranches({
     required String repoPath,
     required String startBranch,
@@ -1018,6 +1108,20 @@ class GitService {
     final remoteBranch = await _remoteBranchFor(repoPath, branchName);
     if (remoteBranch.isNotEmpty) return remoteBranch;
     return branchName;
+  }
+
+  Future<List<String>> _conflictedFiles(String repoPath) async {
+    final result = await _run([
+      'diff',
+      '--name-only',
+      '--diff-filter=U',
+    ], repoPath);
+    if (!result.success) return const [];
+    return result.stdout
+        .split(RegExp(r'\r?\n'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList();
   }
 
   Future<String> _remoteBranchFor(String repoPath, String branchName) async {

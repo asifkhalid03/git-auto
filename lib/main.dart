@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -257,6 +258,44 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     if (next != null) {
       unawaited(_refreshCurrentBranch(next));
     }
+  }
+
+  Future<void> _openRepositorySettings(RepositoryInfo repo) async {
+    final commands = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => RepositorySettingsDialog(repo: repo),
+    );
+    if (commands == null) return;
+
+    final updated = repo.copyWith(prePushCommands: commands);
+    setState(() {
+      _repositories = [
+        for (final item in _repositories)
+          if (item.id == repo.id) updated else item,
+      ];
+      if (_selectedRepo?.id == repo.id) {
+        _selectedRepo = updated;
+      }
+      _message = commands.isEmpty
+          ? 'Pre-push checks disabled for ${repo.name}.'
+          : 'Pre-push checks saved for ${repo.name}.';
+    });
+    await _save();
+  }
+
+  Future<bool> _runPrePushCommands(RepositoryInfo repo) async {
+    if (repo.prePushCommands.isEmpty) return true;
+    if (!mounted) return false;
+    final success = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => PrePushCommandRunnerDialog(
+        repoName: repo.name,
+        workingDirectory: repo.path,
+        commands: repo.prePushCommands,
+      ),
+    );
+    return success == true;
   }
 
   String _commitDraftKey(String repoId, String branchName) =>
@@ -707,6 +746,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         await _recordOperation(failure);
         return;
       }
+      final checksPassed = await _runPrePushCommands(repo);
+      if (!checksPassed) {
+        setState(() {
+          _message = 'Push cancelled: pre-push checks failed.';
+        });
+        return;
+      }
       final result = await _git.pushBranch(
         worktreePath: repo.path,
         branchName: branch.branchName,
@@ -926,6 +972,27 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
 
+      final conflictPreviews = await _git.preflightSequentialMergeConflicts(
+        repoPath: repo.path,
+        startBranch: request.targetBranch,
+        nextBranches: request.sourceBranches,
+      );
+      if (conflictPreviews.isNotEmpty) {
+        if (!mounted) return;
+        await showDialog<void>(
+          context: context,
+          builder: (_) =>
+              MergeConflictPreviewDialog(conflicts: conflictPreviews),
+        );
+        await _refreshCurrentBranch(repo);
+        await _refreshTrackedBranches(repo);
+        setState(() {
+          _message =
+              'Sync cancelled: ${conflictPreviews.length} merge conflict ${conflictPreviews.length == 1 ? 'check' : 'checks'} failed.';
+        });
+        return;
+      }
+
       if (!mounted) return;
       setState(() {
         _syncAnimation = SyncAnimationState(
@@ -971,6 +1038,20 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         await _recordOperation(result);
         GitOperationResult? pushResult;
         if (result.success && request.pushAfterSync) {
+          final checksPassed = await _runPrePushCommands(repo);
+          if (!checksPassed) {
+            setState(() {
+              _message =
+                  'Sync finished. Push cancelled: pre-push checks failed.';
+            });
+            await _restoreStartBranchAfterSync(
+              repo: repo,
+              syncResult: result,
+              pushResult: null,
+              startBranch: request.targetBranch,
+            );
+            return;
+          }
           pushResult = await _git.pushSyncedBranches(
             repoPath: repo.path,
             branchNames: request.branchesToPush,
@@ -1316,6 +1397,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           rightPanelCollapsed: _rightPanelCollapsed,
                           cardSize: _cardSize,
                           onChooseFolder: _chooseRepository,
+                          onOpenRepoSettings: () =>
+                              _openRepositorySettings(selectedRepo),
                           onRemoveRepo: () => _removeRepository(selectedRepo),
                           onChangeRepo: (repo) {
                             setState(() => _selectedRepo = repo);
@@ -1502,6 +1585,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.rightPanelCollapsed,
     required this.cardSize,
     required this.onChooseFolder,
+    required this.onOpenRepoSettings,
     required this.onRemoveRepo,
     required this.onChangeRepo,
     required this.onCardSizeChanged,
@@ -1551,6 +1635,7 @@ class RepositoryDashboard extends StatelessWidget {
   final bool rightPanelCollapsed;
   final double cardSize;
   final VoidCallback onChooseFolder;
+  final VoidCallback onOpenRepoSettings;
   final VoidCallback onRemoveRepo;
   final ValueChanged<RepositoryInfo> onChangeRepo;
   final ValueChanged<double> onCardSizeChanged;
@@ -1624,79 +1709,124 @@ class RepositoryDashboard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Row(
-                        children: [
-                          const Icon(
-                            Icons.folder_outlined,
-                            size: 42,
-                            color: Color(0xFF5865F2),
-                          ),
-                          const SizedBox(width: 24),
-                          Expanded(
-                            child: Column(
+                      LayoutBuilder(
+                        builder: (context, headerConstraints) {
+                          final repoSummary = Row(
+                            children: [
+                              const Icon(
+                                Icons.folder_outlined,
+                                size: 42,
+                                color: Color(0xFF5865F2),
+                              ),
+                              const SizedBox(width: 24),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      repo.name,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Theme.of(
+                                        context,
+                                      ).textTheme.headlineSmall,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      repo.path,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        color: mutedTextColor(context),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 8),
+                                    CurrentBranchInline(
+                                      branchName: currentBranch,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          );
+                          final controls = Wrap(
+                            spacing: 10,
+                            runSpacing: 8,
+                            crossAxisAlignment: WrapCrossAlignment.center,
+                            children: [
+                              SizedBox(
+                                width: 180,
+                                child: DropdownButton<RepositoryInfo>(
+                                  value: repo,
+                                  isExpanded: true,
+                                  items: repositories
+                                      .map(
+                                        (item) => DropdownMenuItem(
+                                          value: item,
+                                          child: Text(
+                                            item.name,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      )
+                                      .toList(),
+                                  onChanged: (value) {
+                                    if (value != null) onChangeRepo(value);
+                                  },
+                                ),
+                              ),
+                              Tooltip(
+                                message: darkMode
+                                    ? 'Switch to light mode'
+                                    : 'Switch to dark mode',
+                                child: Switch(
+                                  value: darkMode,
+                                  onChanged: busy ? null : onDarkModeChanged,
+                                ),
+                              ),
+                              Icon(
+                                darkMode ? Icons.dark_mode : Icons.light_mode,
+                                color: Theme.of(context).colorScheme.primary,
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: busy ? null : onChooseFolder,
+                                icon: const Icon(Icons.add),
+                                label: const Text('Add Repo'),
+                              ),
+                              IconButton.outlined(
+                                tooltip: 'Workspace settings',
+                                onPressed: busy ? null : onOpenRepoSettings,
+                                icon: const Icon(Icons.settings_outlined),
+                              ),
+                              IconButton.outlined(
+                                tooltip: 'Remove workspace',
+                                onPressed: busy ? null : onRemoveRepo,
+                                icon: const Icon(Icons.delete_outline),
+                              ),
+                            ],
+                          );
+                          if (headerConstraints.maxWidth < 860) {
+                            return Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                Text(
-                                  repo.name,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: Theme.of(
-                                    context,
-                                  ).textTheme.headlineSmall,
-                                ),
-                                const SizedBox(height: 8),
-                                Text(
-                                  repo.path,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: mutedTextColor(context),
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                CurrentBranchInline(branchName: currentBranch),
+                                repoSummary,
+                                const SizedBox(height: 14),
+                                controls,
                               ],
-                            ),
-                          ),
-                          DropdownButton<RepositoryInfo>(
-                            value: repo,
-                            items: repositories
-                                .map(
-                                  (item) => DropdownMenuItem(
-                                    value: item,
-                                    child: Text(item.name),
-                                  ),
-                                )
-                                .toList(),
-                            onChanged: (value) {
-                              if (value != null) onChangeRepo(value);
-                            },
-                          ),
-                          const SizedBox(width: 12),
-                          Tooltip(
-                            message: darkMode
-                                ? 'Switch to light mode'
-                                : 'Switch to dark mode',
-                            child: Switch(
-                              value: darkMode,
-                              onChanged: busy ? null : onDarkModeChanged,
-                            ),
-                          ),
-                          Icon(
-                            darkMode ? Icons.dark_mode : Icons.light_mode,
-                            color: Theme.of(context).colorScheme.primary,
-                          ),
-                          const SizedBox(width: 12),
-                          OutlinedButton.icon(
-                            onPressed: busy ? null : onChooseFolder,
-                            icon: const Icon(Icons.add),
-                            label: const Text('Add Repo'),
-                          ),
-                          const SizedBox(width: 8),
-                          IconButton.outlined(
-                            tooltip: 'Remove workspace',
-                            onPressed: busy ? null : onRemoveRepo,
-                            icon: const Icon(Icons.delete_outline),
-                          ),
-                        ],
+                            );
+                          }
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(child: repoSummary),
+                              const SizedBox(width: 16),
+                              Flexible(
+                                child: Align(
+                                  alignment: Alignment.centerRight,
+                                  child: controls,
+                                ),
+                              ),
+                            ],
+                          );
+                        },
                       ),
                       const SizedBox(height: 18),
                       UpdateStatusPanel(
@@ -1712,8 +1842,13 @@ class RepositoryDashboard extends StatelessWidget {
                       const Divider(height: 42),
                       LayoutBuilder(
                         builder: (context, toolbarConstraints) {
+                          final buttonStyle = OutlinedButton.styleFrom(
+                            minimumSize: const Size(0, 40),
+                            padding: const EdgeInsets.symmetric(horizontal: 14),
+                            visualDensity: VisualDensity.compact,
+                          );
                           final controls = Wrap(
-                            spacing: 12,
+                            spacing: 10,
                             runSpacing: 10,
                             crossAxisAlignment: WrapCrossAlignment.center,
                             children: [
@@ -1722,23 +1857,35 @@ class RepositoryDashboard extends StatelessWidget {
                                 onChanged: busy ? null : onCardSizeChanged,
                               ),
                               OutlinedButton.icon(
+                                style: buttonStyle,
                                 onPressed: busy || branches.isEmpty
                                     ? null
                                     : onPullSelected,
-                                icon: const Icon(Icons.download),
-                                label: const Text('Pull Selected'),
+                                icon: const Icon(Icons.download, size: 18),
+                                label: const Text(
+                                  'Pull Selected',
+                                  softWrap: false,
+                                ),
                               ),
                               OutlinedButton.icon(
+                                style: buttonStyle,
                                 onPressed: busy || branches.length < 2
                                     ? null
                                     : onSyncBranches,
-                                icon: const Icon(Icons.merge_type),
-                                label: const Text('Sync / Merge'),
+                                icon: const Icon(Icons.merge_type, size: 18),
+                                label: const Text(
+                                  'Sync / Merge',
+                                  softWrap: false,
+                                ),
                               ),
                               OutlinedButton.icon(
+                                style: buttonStyle,
                                 onPressed: busy ? null : onEditBranches,
-                                icon: const Icon(Icons.tune),
-                                label: const Text('Select Branches'),
+                                icon: const Icon(Icons.tune, size: 18),
+                                label: const Text(
+                                  'Select Branches',
+                                  softWrap: false,
+                                ),
                               ),
                             ],
                           );
@@ -1746,7 +1893,7 @@ class RepositoryDashboard extends StatelessWidget {
                             'Branches',
                             style: Theme.of(context).textTheme.titleLarge,
                           );
-                          if (toolbarConstraints.maxWidth < 720) {
+                          if (toolbarConstraints.maxWidth < 1040) {
                             return Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -3485,7 +3632,7 @@ class BranchCardSizeSlider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 230,
+      width: 190,
       child: Row(
         children: [
           const Tooltip(
@@ -3564,39 +3711,45 @@ class UpdateStatusPanel extends StatelessWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        child: Row(
-          children: [
-            Icon(Icons.system_update_alt, color: statusColor),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Wrap(
-                spacing: 18,
-                runSpacing: 8,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  VersionPair(
-                    label: 'Current',
-                    value: 'v$appVersion',
-                    strong: true,
-                  ),
-                  VersionPair(
-                    label: 'Latest',
-                    value: release == null ? '-' : 'v${release.version}',
-                    strong: hasUpdate,
-                  ),
-                  StatusPill(text: statusText, color: statusColor),
-                  if (error != null)
-                    Text(
-                      error!,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Color(0xFFCF3030)),
-                    ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 12),
-            Row(
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final status = Row(
               mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.system_update_alt, color: statusColor),
+                const SizedBox(width: 12),
+                Flexible(
+                  child: Wrap(
+                    spacing: 18,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      VersionPair(
+                        label: 'Current',
+                        value: 'v$appVersion',
+                        strong: true,
+                      ),
+                      VersionPair(
+                        label: 'Latest',
+                        value: release == null ? '-' : 'v${release.version}',
+                        strong: hasUpdate,
+                      ),
+                      StatusPill(text: statusText, color: statusColor),
+                      if (error != null)
+                        Text(
+                          error!,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Color(0xFFCF3030)),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+            final controls = Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
                 const Text(
                   'Auto check',
@@ -3625,7 +3778,6 @@ class UpdateStatusPanel extends StatelessWidget {
                   icon: const Icon(Icons.download_for_offline),
                   label: const Text('Install'),
                 ),
-                const SizedBox(width: 8),
                 OutlinedButton.icon(
                   onPressed: release?.url.isEmpty ?? true
                       ? null
@@ -3634,8 +3786,21 @@ class UpdateStatusPanel extends StatelessWidget {
                   label: const Text('Release'),
                 ),
               ],
-            ),
-          ],
+            );
+            if (constraints.maxWidth < 760) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [status, const SizedBox(height: 10), controls],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: status),
+                const SizedBox(width: 12),
+                controls,
+              ],
+            );
+          },
         ),
       ),
     );
@@ -4095,6 +4260,122 @@ class SyncMergeDialog extends StatefulWidget {
   State<SyncMergeDialog> createState() => _SyncMergeDialogState();
 }
 
+class MergeConflictPreviewDialog extends StatelessWidget {
+  const MergeConflictPreviewDialog({required this.conflicts, super.key});
+
+  final List<MergeConflictPreview> conflicts;
+
+  @override
+  Widget build(BuildContext context) {
+    final totalFiles = conflicts.fold<int>(
+      0,
+      (total, item) => total + item.conflictCount,
+    );
+    return AlertDialog(
+      title: const Text('Merge conflicts found'),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Sync was stopped before changing branches. Resolve these conflicts manually, then run sync again.',
+              style: TextStyle(color: mutedTextColor(context)),
+            ),
+            const SizedBox(height: 12),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isDarkMode(context)
+                    ? const Color(0xFF3B1D24)
+                    : const Color(0xFFFFF1F1),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFCF3030)),
+              ),
+              child: Text(
+                '${conflicts.length} merge ${conflicts.length == 1 ? 'path' : 'paths'} blocked, $totalFiles conflicted ${totalFiles == 1 ? 'file' : 'files'}.',
+                style: TextStyle(
+                  color: isDarkMode(context)
+                      ? const Color(0xFFFFB4B4)
+                      : const Color(0xFF9F1D1D),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: conflicts.length,
+                separatorBuilder: (context, index) =>
+                    Divider(color: borderColor(context)),
+                itemBuilder: (context, index) {
+                  final conflict = conflicts[index];
+                  final shownFiles = conflict.files.take(5).toList();
+                  final hiddenCount = conflict.files.length - shownFiles.length;
+                  return ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFCF3030),
+                    ),
+                    title: Text(
+                      '${conflict.sourceBranch} -> ${conflict.targetBranch}',
+                      style: TextStyle(
+                        color: primaryTextColor(context),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    subtitle: Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${conflict.conflictCount} conflicted ${conflict.conflictCount == 1 ? 'file' : 'files'}',
+                            style: TextStyle(color: mutedTextColor(context)),
+                          ),
+                          const SizedBox(height: 4),
+                          for (final file in shownFiles)
+                            Text(
+                              file,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                color: mutedTextColor(context),
+                                fontSize: 12,
+                              ),
+                            ),
+                          if (hiddenCount > 0)
+                            Text(
+                              '+ $hiddenCount more',
+                              style: TextStyle(
+                                color: mutedTextColor(context),
+                                fontSize: 12,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Close'),
+        ),
+      ],
+    );
+  }
+}
+
 enum SyncMergeMode { bothDirections, oneWay }
 
 enum SyncOrderDirection { forward, backward }
@@ -4498,6 +4779,314 @@ class CarryChangesDialog extends StatelessWidget {
       ],
     );
   }
+}
+
+class RepositorySettingsDialog extends StatefulWidget {
+  const RepositorySettingsDialog({required this.repo, super.key});
+
+  final RepositoryInfo repo;
+
+  @override
+  State<RepositorySettingsDialog> createState() =>
+      _RepositorySettingsDialogState();
+}
+
+class _RepositorySettingsDialogState extends State<RepositorySettingsDialog> {
+  late final _controller = TextEditingController(
+    text: widget.repo.prePushCommands.join(', '),
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  List<String> _commands() => _controller.text
+      .split(',')
+      .map((command) => command.trim())
+      .where((command) => command.isNotEmpty)
+      .toList();
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('${widget.repo.name} settings'),
+      content: SizedBox(
+        width: 560,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Run these commands before push. They do not run before commit.',
+              style: TextStyle(color: mutedTextColor(context)),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _controller,
+              minLines: 3,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                alignLabelWithHint: true,
+                border: OutlineInputBorder(),
+                labelText: 'Before push commands',
+                hintText: 'npm run lint, npm run lint:fix',
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Separate multiple commands with commas. Commands run from the repository folder.',
+              style: TextStyle(color: mutedTextColor(context), fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          onPressed: () => Navigator.of(context).pop(_commands()),
+          icon: const Icon(Icons.save_outlined),
+          label: const Text('Save Settings'),
+        ),
+      ],
+    );
+  }
+}
+
+class PrePushCommandRunnerDialog extends StatefulWidget {
+  const PrePushCommandRunnerDialog({
+    required this.repoName,
+    required this.workingDirectory,
+    required this.commands,
+    super.key,
+  });
+
+  final String repoName;
+  final String workingDirectory;
+  final List<String> commands;
+
+  @override
+  State<PrePushCommandRunnerDialog> createState() =>
+      _PrePushCommandRunnerDialogState();
+}
+
+class _PrePushCommandRunnerDialogState
+    extends State<PrePushCommandRunnerDialog> {
+  final _outputController = ScrollController();
+  final _output = <String>[];
+  late final _commands = [
+    for (final command in widget.commands)
+      _PrePushCommandProgress(command: command),
+  ];
+  var _running = true;
+  var _success = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_runCommands());
+  }
+
+  @override
+  void dispose() {
+    _outputController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _runCommands() async {
+    var success = true;
+    for (var index = 0; index < _commands.length; index++) {
+      final command = _commands[index].command;
+      setState(() {
+        _commands[index] = _commands[index].copyWith(running: true);
+      });
+      _append('> $command');
+      try {
+        final executable = Platform.isWindows ? 'cmd' : 'sh';
+        final args = Platform.isWindows ? ['/c', command] : ['-lc', command];
+        final process = await Process.start(
+          executable,
+          args,
+          workingDirectory: widget.workingDirectory,
+          runInShell: false,
+        );
+        final stdoutDone = process.stdout
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .forEach(_append);
+        final stderrDone = process.stderr
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())
+            .forEach((line) => _append('ERR: $line'));
+        final exitCode = await process.exitCode;
+        await Future.wait([stdoutDone, stderrDone]);
+        if (!mounted) return;
+        setState(() {
+          _commands[index] = _commands[index].copyWith(
+            running: false,
+            exitCode: exitCode,
+          );
+        });
+        _append('Exit code: $exitCode');
+        if (exitCode != 0) {
+          success = false;
+          break;
+        }
+      } catch (error) {
+        if (!mounted) return;
+        setState(() {
+          _commands[index] = _commands[index].copyWith(
+            running: false,
+            exitCode: 1,
+          );
+        });
+        _append('Failed to start command: $error');
+        success = false;
+        break;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _running = false;
+      _success = success;
+    });
+  }
+
+  void _append(String line) {
+    if (!mounted) return;
+    setState(() => _output.add(line));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_outputController.hasClients) return;
+      _outputController.jumpTo(_outputController.position.maxScrollExtent);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: !_running,
+      child: AlertDialog(
+        title: Text('Before push checks: ${widget.repoName}'),
+        content: SizedBox(
+          width: 680,
+          height: 520,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                _running
+                    ? 'Running commands one by one from the repository folder.'
+                    : _success
+                    ? 'All commands passed. Continue with push?'
+                    : 'A command failed. Push has been stopped.',
+                style: TextStyle(color: mutedTextColor(context)),
+              ),
+              const SizedBox(height: 14),
+              for (final command in _commands)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: _commandIcon(command),
+                  title: Text(
+                    command.command,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: primaryTextColor(context),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  trailing: Text(
+                    command.running
+                        ? 'running'
+                        : command.exitCode == null
+                        ? 'waiting'
+                        : 'exit ${command.exitCode}',
+                    style: TextStyle(color: mutedTextColor(context)),
+                  ),
+                ),
+              const SizedBox(height: 10),
+              Expanded(
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: isDarkMode(context)
+                        ? const Color(0xFF0B1220)
+                        : const Color(0xFFF7F9FD),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: borderColor(context)),
+                  ),
+                  child: SingleChildScrollView(
+                    controller: _outputController,
+                    child: SelectableText(
+                      _output.join('\n'),
+                      style: const TextStyle(
+                        fontFamily: 'Consolas',
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (!_running && _success)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Cancel Push'),
+            ),
+          FilledButton(
+            onPressed: _running
+                ? null
+                : () => Navigator.of(context).pop(_success),
+            child: Text(_success ? 'Continue Push' : 'Close'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _commandIcon(_PrePushCommandProgress command) {
+    if (command.running) {
+      return const SizedBox(
+        width: 18,
+        height: 18,
+        child: CircularProgressIndicator(strokeWidth: 2),
+      );
+    }
+    if (command.exitCode == null) {
+      return const Icon(Icons.radio_button_unchecked, size: 18);
+    }
+    if (command.exitCode == 0) {
+      return const Icon(Icons.check_circle, color: Color(0xFF0EA44B));
+    }
+    return const Icon(Icons.error, color: Color(0xFFCF3030));
+  }
+}
+
+class _PrePushCommandProgress {
+  const _PrePushCommandProgress({
+    required this.command,
+    this.running = false,
+    this.exitCode,
+  });
+
+  final String command;
+  final bool running;
+  final int? exitCode;
+
+  _PrePushCommandProgress copyWith({bool? running, int? exitCode}) =>
+      _PrePushCommandProgress(
+        command: command,
+        running: running ?? this.running,
+        exitCode: exitCode ?? this.exitCode,
+      );
 }
 
 class CommitDialog extends StatefulWidget {

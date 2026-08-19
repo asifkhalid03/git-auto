@@ -565,6 +565,51 @@ void main() {
     expect(result.summary, contains('local changes on branch-a'));
     expect(await git.currentBranch(fixture.repoDir.path), 'branch-a');
   });
+
+  test('preflightSequentialMergeConflicts reports conflicts safely', () async {
+    final repoDir = await Directory(
+      '${tempDir.path}${Platform.pathSeparator}repo',
+    ).create();
+
+    await _runGit(['init', '-b', 'branch-a', '.'], repoDir.path);
+    await _configureUser(repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}shared.txt',
+    ).writeAsString('base\n');
+    await _runGit(['add', 'shared.txt'], repoDir.path);
+    await _runGit(['commit', '-m', 'Base'], repoDir.path);
+
+    await _runGit(['switch', '-c', 'branch-b'], repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}shared.txt',
+    ).writeAsString('branch b\n');
+    await _runGit(['commit', '-am', 'Branch B change'], repoDir.path);
+
+    await _runGit(['switch', 'branch-a'], repoDir.path);
+    await File(
+      '${repoDir.path}${Platform.pathSeparator}shared.txt',
+    ).writeAsString('branch a\n');
+    await _runGit(['commit', '-am', 'Branch A change'], repoDir.path);
+
+    final conflicts = await git.preflightSequentialMergeConflicts(
+      repoPath: repoDir.path,
+      startBranch: 'branch-a',
+      nextBranches: ['branch-b'],
+    );
+    final unmerged = await _runGit([
+      'diff',
+      '--name-only',
+      '--diff-filter=U',
+    ], repoDir.path);
+
+    expect(conflicts, isNotEmpty);
+    expect(conflicts.first.sourceBranch, 'branch-b');
+    expect(conflicts.first.targetBranch, 'branch-a');
+    expect(conflicts.first.conflictCount, 1);
+    expect(conflicts.first.files, contains('shared.txt'));
+    expect(await git.currentBranch(repoDir.path), 'branch-a');
+    expect(unmerged.stdout.trim(), isEmpty);
+  });
 }
 
 Future<_ThreeBranchFixture> _createThreeBranchRemoteRepo(

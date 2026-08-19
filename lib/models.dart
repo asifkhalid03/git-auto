@@ -7,6 +7,7 @@ class RepositoryInfo {
     required this.path,
     required this.defaultBranch,
     required this.remoteUrl,
+    this.prePushCommands = const [],
   });
 
   final String id;
@@ -14,6 +15,23 @@ class RepositoryInfo {
   final String path;
   final String defaultBranch;
   final String remoteUrl;
+  final List<String> prePushCommands;
+
+  RepositoryInfo copyWith({
+    String? id,
+    String? name,
+    String? path,
+    String? defaultBranch,
+    String? remoteUrl,
+    List<String>? prePushCommands,
+  }) => RepositoryInfo(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    path: path ?? this.path,
+    defaultBranch: defaultBranch ?? this.defaultBranch,
+    remoteUrl: remoteUrl ?? this.remoteUrl,
+    prePushCommands: prePushCommands ?? this.prePushCommands,
+  );
 
   Map<String, dynamic> toJson() => {
     'id': id,
@@ -21,6 +39,7 @@ class RepositoryInfo {
     'path': path,
     'defaultBranch': defaultBranch,
     'remoteUrl': remoteUrl,
+    'prePushCommands': prePushCommands,
   };
 
   factory RepositoryInfo.fromJson(Map<String, dynamic> json) => RepositoryInfo(
@@ -29,6 +48,10 @@ class RepositoryInfo {
     path: json['path'] as String,
     defaultBranch: json['defaultBranch'] as String? ?? '',
     remoteUrl: json['remoteUrl'] as String? ?? '',
+    prePushCommands: (json['prePushCommands'] as List<dynamic>? ?? [])
+        .map((item) => item.toString().trim())
+        .where((item) => item.isNotEmpty)
+        .toList(),
   );
 }
 
