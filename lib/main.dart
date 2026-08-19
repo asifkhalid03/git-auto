@@ -283,7 +283,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     await _save();
   }
 
-  Future<bool> _runPrePushCommands(RepositoryInfo repo) async {
+  Future<bool> _runPrePushCommands(
+    RepositoryInfo repo, {
+    String actionName = 'push',
+  }) async {
     if (repo.prePushCommands.isEmpty) return true;
     if (!mounted) return false;
     final success = await showDialog<bool>(
@@ -293,6 +296,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         repoName: repo.name,
         workingDirectory: repo.path,
         commands: repo.prePushCommands,
+        actionName: actionName,
       ),
     );
     return success == true;
@@ -972,6 +976,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
 
+      final checksPassed = await _runPrePushCommands(repo, actionName: 'sync');
+      if (!checksPassed) {
+        setState(() {
+          _message = 'Sync cancelled: pre-sync checks did not pass.';
+        });
+        return;
+      }
+
       final conflictPreviews = await _git.preflightSequentialMergeConflicts(
         repoPath: repo.path,
         startBranch: request.targetBranch,
@@ -1038,20 +1050,6 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         await _recordOperation(result);
         GitOperationResult? pushResult;
         if (result.success && request.pushAfterSync) {
-          final checksPassed = await _runPrePushCommands(repo);
-          if (!checksPassed) {
-            setState(() {
-              _message =
-                  'Sync finished. Push cancelled: pre-push checks failed.';
-            });
-            await _restoreStartBranchAfterSync(
-              repo: repo,
-              syncResult: result,
-              pushResult: null,
-              startBranch: request.targetBranch,
-            );
-            return;
-          }
           pushResult = await _git.pushSyncedBranches(
             repoPath: repo.path,
             branchNames: request.branchesToPush,
@@ -4862,12 +4860,14 @@ class PrePushCommandRunnerDialog extends StatefulWidget {
     required this.repoName,
     required this.workingDirectory,
     required this.commands,
+    this.actionName = 'push',
     super.key,
   });
 
   final String repoName;
   final String workingDirectory;
   final List<String> commands;
+  final String actionName;
 
   @override
   State<PrePushCommandRunnerDialog> createState() =>
@@ -4967,10 +4967,14 @@ class _PrePushCommandRunnerDialogState
 
   @override
   Widget build(BuildContext context) {
+    final actionLabel = widget.actionName.trim().isEmpty
+        ? 'push'
+        : widget.actionName.trim();
+    final titleAction = actionLabel[0].toUpperCase() + actionLabel.substring(1);
     return PopScope(
       canPop: !_running,
       child: AlertDialog(
-        title: Text('Before push checks: ${widget.repoName}'),
+        title: Text('Before $actionLabel checks: ${widget.repoName}'),
         content: SizedBox(
           width: 680,
           height: 520,
@@ -4981,8 +4985,8 @@ class _PrePushCommandRunnerDialogState
                 _running
                     ? 'Running commands one by one from the repository folder.'
                     : _success
-                    ? 'All commands passed. Continue with push?'
-                    : 'A command failed. Push has been stopped.',
+                    ? 'All commands passed. Continue $actionLabel?'
+                    : 'A command failed. $titleAction has been stopped.',
                 style: TextStyle(color: mutedTextColor(context)),
               ),
               const SizedBox(height: 14),
@@ -5020,13 +5024,18 @@ class _PrePushCommandRunnerDialogState
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: borderColor(context)),
                   ),
-                  child: SingleChildScrollView(
+                  child: Scrollbar(
                     controller: _outputController,
-                    child: SelectableText(
-                      _output.join('\n'),
-                      style: const TextStyle(
-                        fontFamily: 'Consolas',
-                        fontSize: 12,
+                    thumbVisibility: true,
+                    child: SingleChildScrollView(
+                      controller: _outputController,
+                      primary: false,
+                      child: SelectableText(
+                        _output.join('\n'),
+                        style: const TextStyle(
+                          fontFamily: 'Consolas',
+                          fontSize: 12,
+                        ),
                       ),
                     ),
                   ),
@@ -5039,13 +5048,13 @@ class _PrePushCommandRunnerDialogState
           if (!_running && _success)
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel Push'),
+              child: Text('Cancel $titleAction'),
             ),
           FilledButton(
             onPressed: _running
                 ? null
                 : () => Navigator.of(context).pop(_success),
-            child: Text(_success ? 'Continue Push' : 'Close'),
+            child: Text(_success ? 'Continue $titleAction' : 'Close'),
           ),
         ],
       ),
