@@ -354,9 +354,9 @@ void main() {
     expect(
       steps,
       containsAllInOrder([
+        'branch-c->branch-b',
         'branch-b->branch-a',
         'branch-a->branch-b',
-        'branch-c->branch-b',
         'branch-b->branch-c',
       ]),
     );
@@ -400,9 +400,9 @@ void main() {
       expect(
         steps,
         containsAllInOrder([
+          'branch-c->branch-b',
           'branch-b->branch-a',
           'branch-a->branch-b',
-          'branch-c->branch-b',
           'branch-b->branch-c',
         ]),
       );
@@ -437,14 +437,10 @@ void main() {
 
       expect(result.success, isTrue, reason: result.summary);
       expect(steps, [
+        'branch-c->branch-b',
         'branch-b->branch-a',
         'branch-a->branch-b',
-        'branch-c->branch-b',
         'branch-b->branch-c',
-        'branch-c->branch-b',
-        'branch-b->branch-c',
-        'branch-b->branch-a',
-        'branch-a->branch-b',
       ]);
       for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
         await _runGit(['switch', branch], fixture.repoDir.path);
@@ -465,6 +461,41 @@ void main() {
       }
     },
   );
+
+  test('syncSequentialBranches pushes branches after cascade merges', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+
+    await _runGit(['switch', 'branch-c'], fixture.repoDir.path);
+    await File(
+      '${fixture.repoDir.path}${Platform.pathSeparator}local-c-push.txt',
+    ).writeAsString('local c');
+    await _runGit(['add', 'local-c-push.txt'], fixture.repoDir.path);
+    await _runGit(['commit', '-m', 'Local C push'], fixture.repoDir.path);
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+
+    final result = await git.syncSequentialBranches(
+      repoPath: fixture.repoDir.path,
+      startBranch: 'branch-a',
+      nextBranches: ['branch-b', 'branch-c'],
+      pushAfterMerge: true,
+    );
+
+    expect(result.success, isTrue, reason: result.summary);
+
+    await _runGit(['fetch', 'origin', 'branch-a'], fixture.otherDir);
+    final remoteAFile = await _runGit([
+      'show',
+      'origin/branch-a:local-c-push.txt',
+    ], fixture.otherDir);
+    await _runGit(['fetch', 'origin', 'branch-b'], fixture.otherDir);
+    final remoteBFile = await _runGit([
+      'show',
+      'origin/branch-b:local-c-push.txt',
+    ], fixture.otherDir);
+
+    expect(remoteAFile.stdout.trim(), 'local c');
+    expect(remoteBFile.stdout.trim(), 'local c');
+  });
 
   test('commitBranch can amend the latest commit', () async {
     final repoDir = await Directory(

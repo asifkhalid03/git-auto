@@ -188,6 +188,17 @@ class GitService {
     return path;
   }
 
+  Future<void> removeWorktree({
+    required String repoPath,
+    required String worktreePath,
+  }) async {
+    final dir = Directory(worktreePath);
+    if (await dir.exists()) {
+      await _run(['worktree', 'remove', '--force', worktreePath], repoPath);
+    }
+    await _run(['worktree', 'prune'], repoPath);
+  }
+
   Future<BranchStatus> getBranchStatus(
     String worktreePath,
     String upstream, {
@@ -462,6 +473,7 @@ class GitService {
     required String repoPath,
     required String startBranch,
     required List<String> nextBranches,
+    bool pushAfterMerge = false,
     Future<void> Function(SyncMergeStep step)? onStep,
   }) async {
     final startedAt = DateTime.now();
@@ -538,7 +550,11 @@ class GitService {
         );
         return false;
       }
-      final pull = await pullBranch(repoPath, upstream);
+      final fetch = await _run(['fetch', '--prune'], repoPath);
+      combined = _combine(combined, fetch);
+      if (!fetch.success) return false;
+
+      final pull = await _run(['pull', '--no-rebase', '--no-edit'], repoPath);
       combined = _combine(
         combined,
         _GitProcessResult(
@@ -556,50 +572,55 @@ class GitService {
       final revision = await _branchRevision(repoPath, source);
       final merge = await _run(['merge', '--no-edit', revision], repoPath);
       combined = _combine(combined, merge);
-      return merge.success;
-    }
+      if (!merge.success) return false;
 
-    for (final branch in orderedBranches) {
-      if (!await pullBranchInSequence(branch)) {
-        return _resultFromProcess('sync', branch, combined, startedAt);
-      }
-    }
-
-    Future<bool> syncPair(int previousIndex, int nextIndex) async {
-      final previous = orderedBranches[previousIndex];
-      final branch = orderedBranches[nextIndex];
-      final mergeNextIntoPrevious = await mergeInto(previous, branch);
-      if (!mergeNextIntoPrevious) {
-        return false;
-      }
-
-      final mergePreviousIntoNext = await mergeInto(branch, previous);
-      if (!mergePreviousIntoNext) {
-        return false;
+      if (pushAfterMerge) {
+        final push = await _pushCurrentBranchToOriginBranch(repoPath, target);
+        combined = _combine(combined, push);
+        if (!push.success) return false;
       }
       return true;
     }
 
-    for (var index = 1; index < orderedBranches.length; index++) {
-      if (!await syncPair(index - 1, index)) {
-        return _resultFromProcess(
-          'sync',
-          orderedBranches[index],
-          combined,
-          startedAt,
-        );
+    try {
+      for (final branch in orderedBranches) {
+        if (!await pullBranchInSequence(branch)) {
+          return _resultFromProcess('sync', branch, combined, startedAt);
+        }
       }
-    }
 
-    for (var index = orderedBranches.length - 2; index >= 0; index--) {
-      if (!await syncPair(index, index + 1)) {
-        return _resultFromProcess(
-          'sync',
+      for (var index = orderedBranches.length - 1; index > 0; index--) {
+        if (!await mergeInto(
+          orderedBranches[index - 1],
           orderedBranches[index],
-          combined,
-          startedAt,
-        );
+        )) {
+          return _resultFromProcess(
+            'sync',
+            orderedBranches[index - 1],
+            combined,
+            startedAt,
+          );
+        }
       }
+
+      for (var index = 1; index < orderedBranches.length; index++) {
+        if (!await mergeInto(
+          orderedBranches[index],
+          orderedBranches[index - 1],
+        )) {
+          return _resultFromProcess(
+            'sync',
+            orderedBranches[index],
+            combined,
+            startedAt,
+          );
+        }
+      }
+    } finally {
+      await checkoutBranch(
+        repoPath: repoPath,
+        branchName: orderedBranches.first,
+      );
     }
 
     return _resultFromProcess(
@@ -665,17 +686,17 @@ class GitService {
     }
 
     try {
-      for (var index = 1; index < orderedBranches.length; index++) {
-        final previous = orderedBranches[index - 1];
-        final branch = orderedBranches[index];
-        await testMerge(target: previous, source: branch);
-        await testMerge(target: branch, source: previous);
+      for (var index = orderedBranches.length - 1; index > 0; index--) {
+        await testMerge(
+          target: orderedBranches[index - 1],
+          source: orderedBranches[index],
+        );
       }
-      for (var index = orderedBranches.length - 2; index >= 0; index--) {
-        final previous = orderedBranches[index];
-        final branch = orderedBranches[index + 1];
-        await testMerge(target: previous, source: branch);
-        await testMerge(target: branch, source: previous);
+      for (var index = 1; index < orderedBranches.length; index++) {
+        await testMerge(
+          target: orderedBranches[index],
+          source: orderedBranches[index - 1],
+        );
       }
     } finally {
       if (originalBranch.isNotEmpty) {
@@ -690,6 +711,7 @@ class GitService {
     required String repoPath,
     required String startBranch,
     required List<String> branchNames,
+    Future<void> Function(String message)? onProgress,
   }) async {
     final startedAt = DateTime.now();
     final branches = [
@@ -708,6 +730,7 @@ class GitService {
     var combined = _GitProcessResult(exitCode: 0, stdout: '', stderr: '');
 
     Future<bool> checkoutClean(String branch) async {
+      await onProgress?.call('Checking out $branch');
       final checkout = await checkoutBranch(
         repoPath: repoPath,
         branchName: branch,
@@ -751,9 +774,11 @@ class GitService {
 
     for (final branch in branches) {
       if (!await checkoutClean(branch)) {
+        await onProgress?.call('Switching back to $startBranch');
         await checkoutBranch(repoPath: repoPath, branchName: startBranch);
         return _resultFromProcess('pull selected', branch, combined, startedAt);
       }
+      await onProgress?.call('Reading upstream for $branch');
       final upstream = await upstreamFor(repoPath, branch);
       if (upstream.isEmpty) {
         combined = _combine(
@@ -764,10 +789,20 @@ class GitService {
             stderr: 'No upstream configured for $branch.',
           ),
         );
+        await onProgress?.call('Switching back to $startBranch');
         await checkoutBranch(repoPath: repoPath, branchName: startBranch);
         return _resultFromProcess('pull selected', branch, combined, startedAt);
       }
-      final pull = await pullBranch(repoPath, upstream);
+      await onProgress?.call('Fetching $branch');
+      final fetch = await _run(['fetch', '--prune'], repoPath);
+      combined = _combine(combined, fetch);
+      if (!fetch.success) {
+        await onProgress?.call('Switching back to $startBranch');
+        await checkoutBranch(repoPath: repoPath, branchName: startBranch);
+        return _resultFromProcess('pull selected', branch, combined, startedAt);
+      }
+      await onProgress?.call('Pulling $branch');
+      final pull = await _run(['pull', '--no-rebase', '--no-edit'], repoPath);
       combined = _combine(
         combined,
         _GitProcessResult(
@@ -777,11 +812,13 @@ class GitService {
         ),
       );
       if (!pull.success) {
+        await onProgress?.call('Switching back to $startBranch');
         await checkoutBranch(repoPath: repoPath, branchName: startBranch);
         return _resultFromProcess('pull selected', branch, combined, startedAt);
       }
     }
 
+    await onProgress?.call('Switching back to $startBranch');
     final restore = await checkoutBranch(
       repoPath: repoPath,
       branchName: startBranch,

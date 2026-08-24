@@ -673,14 +673,17 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       );
       if (result == null) return;
       final worktreesRoot = await _storage.worktreesDirectory();
+      final oldWorktreePaths = _branches
+          .where(
+            (branch) =>
+                branch.repoId == repo.id &&
+                branch.worktreePath != repo.path &&
+                _isInsideDirectory(branch.worktreePath, worktreesRoot.path),
+          )
+          .map((branch) => branch.worktreePath)
+          .toSet();
       final tracked = <TrackedBranch>[];
       for (final branchName in result) {
-        final worktreePath = await _git.ensureWorktree(
-          repoPath: repo.path,
-          repoId: repo.id,
-          branchName: branchName,
-          worktreesRoot: worktreesRoot,
-        );
         final upstream = await _git.upstreamFor(repo.path, branchName);
         final previous = _branches
             .where(
@@ -698,7 +701,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
             repoId: repo.id,
             branchName: branchName,
             upstream: upstream,
-            worktreePath: worktreePath,
+            worktreePath: repo.path,
             lastPullAt: previous?.lastPullAt,
             lastStatus: status,
           ),
@@ -711,7 +714,23 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         ];
       });
       await _save();
+      for (final worktreePath in oldWorktreePaths) {
+        await _git.removeWorktree(
+          repoPath: repo.path,
+          worktreePath: worktreePath,
+        );
+      }
     });
+  }
+
+  bool _isInsideDirectory(String childPath, String parentPath) {
+    final child = p.normalize(p.absolute(childPath));
+    final parent = p.normalize(p.absolute(parentPath));
+    if (Platform.isWindows) {
+      return p.equals(child.toLowerCase(), parent.toLowerCase()) ||
+          p.isWithin(parent.toLowerCase(), child.toLowerCase());
+    }
+    return p.equals(child, parent) || p.isWithin(parent, child);
   }
 
   Future<void> _refreshBranch(TrackedBranch branch) async {
@@ -950,6 +969,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         activeUpstream,
         fetch: false,
       );
+      var committedCurrentBranch = false;
       if (activeStatus.hasConflicts) {
         setState(() {
           _message = 'Resolve conflicts on $activeBranch before syncing.';
@@ -988,24 +1008,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         await _recordOperation(commitResult);
         await _refreshTrackedBranches(repo);
         if (!commitResult.success) return;
+        committedCurrentBranch = true;
       }
-
-      setState(() {
-        _message = 'Refreshing and pulling current branch: $activeBranch';
-      });
-      final pullResult = await _git.pullBranch(repo.path, activeUpstream);
-      await _recordOperation(pullResult);
-      if (!pullResult.success) {
-        await _refreshCurrentBranch(repo);
-        await _refreshTrackedBranches(repo);
-        setState(() {
-          _message =
-              'Sync cancelled: pull failed on current branch $activeBranch.';
-        });
-        return;
-      }
-      await _refreshCurrentBranch(repo);
-      await _refreshTrackedBranches(repo);
 
       final checksPassed = await _runPrePushCommands(repo, actionName: 'sync');
       if (!checksPassed) {
@@ -1013,6 +1017,22 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           _message = 'Sync cancelled: pre-sync checks did not pass.';
         });
         return;
+      }
+      if (request.pushAfterSync && committedCurrentBranch) {
+        final pushCurrentResult = await _git.pushBranch(
+          worktreePath: repo.path,
+          branchName: activeBranch,
+        );
+        await _recordOperation(pushCurrentResult);
+        if (!pushCurrentResult.success) {
+          await _refreshCurrentBranch(repo);
+          await _refreshTrackedBranches(repo);
+          setState(() {
+            _message =
+                'Sync cancelled: push failed after committing $activeBranch.';
+          });
+          return;
+        }
       }
 
       final conflictPreviews = await _git.preflightSequentialMergeConflicts(
@@ -1052,6 +1072,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           repoPath: repo.path,
           startBranch: request.targetBranch,
           nextBranches: request.sourceBranches,
+          pushAfterMerge: request.pushAfterSync,
           onStep: (step) async {
             if (!mounted) return;
             setState(() {
@@ -1079,18 +1100,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           },
         );
         await _recordOperation(result);
-        GitOperationResult? pushResult;
-        if (result.success && request.pushAfterSync) {
-          pushResult = await _git.pushSyncedBranches(
-            repoPath: repo.path,
-            branchNames: request.branchesToPush,
-          );
-          await _recordOperation(pushResult);
-        }
         await _restoreStartBranchAfterSync(
           repo: repo,
           syncResult: result,
-          pushResult: pushResult,
+          pushResult: null,
           startBranch: request.targetBranch,
         );
         await _refreshCurrentBranch(repo);
@@ -1167,6 +1180,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         repoPath: repo.path,
         startBranch: currentBranch,
         branchNames: branches.map((branch) => branch.branchName).toList(),
+        onProgress: (message) async {
+          if (!mounted) return;
+          setState(() {
+            _message = 'Pull selected: $message';
+          });
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        },
       );
       await _recordOperation(result);
       await _refreshCurrentBranch(repo);
@@ -4462,7 +4482,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
         ? forwardText
         : backwardText;
     final modeText = _mode == SyncMergeMode.bothDirections
-        ? 'Branches are pulled in order. Neighbor pairs sync both ways forward, then backward, so changes propagate across the chain.'
+        ? 'Branches are pulled in order, then merged backward and forward across the selected chain.'
         : 'Sequential sync follows the selected path: $selectedPathText.';
     return AlertDialog(
       title: const Text('Sync / Merge Branches'),
@@ -4528,7 +4548,7 @@ class _SyncMergeDialogState extends State<SyncMergeDialog> {
               value: _pushAfterSync,
               title: const Text('Push after sync'),
               subtitle: Text(
-                'Off by default. Enable only when you want to push every selected branch after sync.',
+                'Off by default. Enable only when you want to push branches after they receive sync changes.',
               ),
               controlAffinity: ListTileControlAffinity.leading,
               onChanged: (checked) {
@@ -4668,6 +4688,7 @@ class SyncPreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final displayBranches = bothDirections ? _cascadeBranches : branches;
     if (branches.length < 2) {
       return const Text(
         'Select at least one source branch.',
@@ -4699,12 +4720,18 @@ class SyncPreview extends StatelessWidget {
               runSpacing: 8,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                for (var index = 0; index < branches.length; index++) ...[
+                for (
+                  var index = 0;
+                  index < displayBranches.length;
+                  index++
+                ) ...[
                   BranchFlowChip(
-                    label: branches[index],
-                    emphasized: index == 0,
+                    label: displayBranches[index],
+                    emphasized: bothDirections
+                        ? index == branches.length - 1
+                        : index == 0,
                   ),
-                  if (index < branches.length - 1)
+                  if (index < displayBranches.length - 1)
                     const Icon(
                       Icons.arrow_forward,
                       size: 18,
@@ -4726,11 +4753,17 @@ class SyncPreview extends StatelessWidget {
 
   String get _summaryText {
     final pushText = pushAfterSync
-        ? ' Then all selected branches are pushed.'
+        ? ' Branches are pushed after they receive sync changes.'
         : '';
-    const syncText =
-        'Each branch is pulled in order. Neighboring pairs sync both ways forward, then backward, so all selected branches receive the chain updates.';
+    final syncText = bothDirections
+        ? 'Each branch is pulled first. Then the chain merges backward and forward so all selected branches receive the updates.'
+        : 'Each branch is pulled first. Then changes merge across the selected path.';
     return '$syncText$pushText';
+  }
+
+  List<String> get _cascadeBranches {
+    if (branches.length < 2) return branches;
+    return [...branches.reversed, ...branches.skip(1)];
   }
 }
 
