@@ -2,7 +2,7 @@
 #define MyAppPublisher "MAK"
 #define MyAppExeName "git_flow.exe"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.17"
+#define MyAppVersion "1.0.18"
 #endif
 
 [Setup]

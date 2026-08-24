@@ -497,6 +497,87 @@ void main() {
     expect(remoteBFile.stdout.trim(), 'local c');
   });
 
+  test('mergeBranchIntoCurrent pulls source and merges into current', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+    final progress = <String>[];
+
+    await _runGit(['switch', 'branch-b'], fixture.otherDir);
+    await File(
+      '${fixture.otherDir}${Platform.pathSeparator}remote-b-merge.txt',
+    ).writeAsString('remote b merge');
+    await _runGit(['add', 'remote-b-merge.txt'], fixture.otherDir);
+    await _runGit(['commit', '-m', 'Remote B merge'], fixture.otherDir);
+    await _runGit(['push'], fixture.otherDir);
+
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    final result = await git.mergeBranchIntoCurrent(
+      repoPath: fixture.repoDir.path,
+      currentBranch: 'branch-a',
+      sourceBranch: 'branch-b',
+      onProgress: (message) async => progress.add(message),
+    );
+
+    expect(result.success, isTrue, reason: result.summary);
+    expect(await git.currentBranch(fixture.repoDir.path), 'branch-a');
+    expect(
+      await File(
+        '${fixture.repoDir.path}${Platform.pathSeparator}remote-b-merge.txt',
+      ).exists(),
+      isTrue,
+    );
+    expect(
+      progress,
+      containsAllInOrder([
+        'Checking out branch-b',
+        'Pulling branch-b',
+        'Checking out branch-a',
+        'Merging branch-b into branch-a',
+      ]),
+    );
+  });
+
+  test('mergeBranchIntoCurrent reports conflicts and aborts safely', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+    final conflicts = <MergeConflictPreview>[];
+
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    await File(
+      '${fixture.repoDir.path}${Platform.pathSeparator}shared.txt',
+    ).writeAsString('branch a');
+    await _runGit(['add', 'shared.txt'], fixture.repoDir.path);
+    await _runGit(['commit', '-m', 'Branch A shared'], fixture.repoDir.path);
+    await _runGit(['push'], fixture.repoDir.path);
+
+    await _runGit(['switch', 'branch-b'], fixture.repoDir.path);
+    await File(
+      '${fixture.repoDir.path}${Platform.pathSeparator}shared.txt',
+    ).writeAsString('branch b');
+    await _runGit(['add', 'shared.txt'], fixture.repoDir.path);
+    await _runGit(['commit', '-m', 'Branch B shared'], fixture.repoDir.path);
+    await _runGit(['push'], fixture.repoDir.path);
+
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    final result = await git.mergeBranchIntoCurrent(
+      repoPath: fixture.repoDir.path,
+      currentBranch: 'branch-a',
+      sourceBranch: 'branch-b',
+      onConflicts: (items) async => conflicts.addAll(items),
+    );
+    final unmerged = await _runGit([
+      'diff',
+      '--name-only',
+      '--diff-filter=U',
+    ], fixture.repoDir.path);
+
+    expect(result.success, isFalse);
+    expect(conflicts, hasLength(1));
+    expect(conflicts.first.sourceBranch, 'branch-b');
+    expect(conflicts.first.targetBranch, 'branch-a');
+    expect(conflicts.first.files, contains('shared.txt'));
+    expect(await git.currentBranch(fixture.repoDir.path), 'branch-a');
+    expect(unmerged.stdout.trim(), isEmpty);
+  });
+
   test('commitBranch can amend the latest commit', () async {
     final repoDir = await Directory(
       '${tempDir.path}${Platform.pathSeparator}repo',

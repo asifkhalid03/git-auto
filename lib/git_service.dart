@@ -707,6 +707,225 @@ class GitService {
     return previews;
   }
 
+  Future<List<MergeConflictPreview>> preflightMergeBranchIntoCurrent({
+    required String repoPath,
+    required String currentBranch,
+    required String sourceBranch,
+  }) async {
+    final originalBranch = await this.currentBranch(repoPath);
+    final previews = <MergeConflictPreview>[];
+
+    try {
+      final checkout = await checkoutBranch(
+        repoPath: repoPath,
+        branchName: currentBranch,
+      );
+      if (!checkout.success) return const [];
+
+      final status = await getBranchStatus(repoPath, '', fetch: false);
+      if (status.hasConflicts || status.hasLocalChanges) return const [];
+
+      final revision = await _branchRevision(repoPath, sourceBranch);
+      final merge = await _run([
+        'merge',
+        '--no-commit',
+        '--no-ff',
+        revision,
+      ], repoPath);
+      if (merge.success) {
+        await _run(['merge', '--abort'], repoPath);
+        return const [];
+      }
+
+      final conflicts = await _conflictedFiles(repoPath);
+      await _run(['merge', '--abort'], repoPath);
+      if (conflicts.isEmpty) return const [];
+      previews.add(
+        MergeConflictPreview(
+          sourceBranch: sourceBranch,
+          targetBranch: currentBranch,
+          conflictCount: conflicts.length,
+          files: conflicts,
+        ),
+      );
+    } finally {
+      if (originalBranch.isNotEmpty) {
+        await checkoutBranch(repoPath: repoPath, branchName: originalBranch);
+      }
+    }
+
+    return previews;
+  }
+
+  Future<GitOperationResult> mergeBranchIntoCurrent({
+    required String repoPath,
+    required String currentBranch,
+    required String sourceBranch,
+    Future<void> Function(String message)? onProgress,
+    Future<void> Function(List<MergeConflictPreview> conflicts)? onConflicts,
+  }) async {
+    final startedAt = DateTime.now();
+    var combined = _GitProcessResult(exitCode: 0, stdout: '', stderr: '');
+
+    Future<bool> checkoutClean(String branch) async {
+      await onProgress?.call('Checking out $branch');
+      final checkout = await checkoutBranch(
+        repoPath: repoPath,
+        branchName: branch,
+      );
+      combined = _combine(
+        combined,
+        _GitProcessResult(
+          exitCode: checkout.success ? 0 : 1,
+          stdout: checkout.stdout,
+          stderr: checkout.stderr,
+        ),
+      );
+      if (!checkout.success) return false;
+
+      final status = await getBranchStatus(repoPath, '', fetch: false);
+      if (status.hasConflicts) {
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr: 'Resolve conflicts on $branch before merging.',
+          ),
+        );
+        return false;
+      }
+      if (status.hasLocalChanges) {
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr:
+                'Commit, stash, or discard local changes on $branch before merging.',
+          ),
+        );
+        return false;
+      }
+      return true;
+    }
+
+    if (!await checkoutClean(sourceBranch)) {
+      await checkoutBranch(repoPath: repoPath, branchName: currentBranch);
+      return _resultFromProcess(
+        'merge branch',
+        sourceBranch,
+        combined,
+        startedAt,
+      );
+    }
+
+    final upstream = await upstreamFor(repoPath, sourceBranch);
+    if (upstream.isEmpty) {
+      combined = _combine(
+        combined,
+        _GitProcessResult(
+          exitCode: 1,
+          stdout: '',
+          stderr: 'No upstream configured for $sourceBranch.',
+        ),
+      );
+      await checkoutBranch(repoPath: repoPath, branchName: currentBranch);
+      return _resultFromProcess(
+        'merge branch',
+        sourceBranch,
+        combined,
+        startedAt,
+      );
+    }
+
+    await onProgress?.call('Fetching $sourceBranch');
+    final fetch = await _run(['fetch', '--prune'], repoPath);
+    combined = _combine(combined, fetch);
+    if (!fetch.success) {
+      await checkoutBranch(repoPath: repoPath, branchName: currentBranch);
+      return _resultFromProcess(
+        'merge branch',
+        sourceBranch,
+        combined,
+        startedAt,
+      );
+    }
+
+    await onProgress?.call('Pulling $sourceBranch');
+    final pull = await _run(['pull', '--no-rebase', '--no-edit'], repoPath);
+    combined = _combine(combined, pull);
+    if (!pull.success) {
+      await checkoutBranch(repoPath: repoPath, branchName: currentBranch);
+      return _resultFromProcess(
+        'merge branch',
+        sourceBranch,
+        combined,
+        startedAt,
+      );
+    }
+
+    if (!await checkoutClean(currentBranch)) {
+      return _resultFromProcess(
+        'merge branch',
+        currentBranch,
+        combined,
+        startedAt,
+      );
+    }
+
+    await onProgress?.call('Merging $sourceBranch into $currentBranch');
+    final revision = await _branchRevision(repoPath, sourceBranch);
+    final testMerge = await _run([
+      'merge',
+      '--no-commit',
+      '--no-ff',
+      revision,
+    ], repoPath);
+    if (testMerge.success) {
+      await _run(['merge', '--abort'], repoPath);
+    } else {
+      final conflicts = await _conflictedFiles(repoPath);
+      await _run(['merge', '--abort'], repoPath);
+      if (conflicts.isNotEmpty) {
+        final previews = [
+          MergeConflictPreview(
+            sourceBranch: sourceBranch,
+            targetBranch: currentBranch,
+            conflictCount: conflicts.length,
+            files: conflicts,
+          ),
+        ];
+        await onConflicts?.call(previews);
+        combined = _combine(
+          combined,
+          _GitProcessResult(
+            exitCode: 1,
+            stdout: '',
+            stderr:
+                'Merge blocked: ${conflicts.length} conflicted ${conflicts.length == 1 ? 'file' : 'files'} merging $sourceBranch into $currentBranch.',
+          ),
+        );
+        return _resultFromProcess(
+          'merge branch',
+          currentBranch,
+          combined,
+          startedAt,
+        );
+      }
+    }
+
+    final merge = await _run(['merge', '--no-edit', revision], repoPath);
+    combined = _combine(combined, merge);
+
+    return _resultFromProcess(
+      'merge branch',
+      currentBranch,
+      combined,
+      startedAt,
+    );
+  }
+
   Future<GitOperationResult> pullSelectedBranches({
     required String repoPath,
     required String startBranch,

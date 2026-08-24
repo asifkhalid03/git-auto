@@ -1199,6 +1199,125 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     });
   }
 
+  Future<void> _mergeBranchIntoCurrent(
+    RepositoryInfo repo,
+    String currentBranch,
+  ) async {
+    if (currentBranch.isEmpty) {
+      setState(() => _message = 'No current branch selected.');
+      return;
+    }
+
+    final availableBranches = await _git.listBranches(
+      repo.path,
+      includeRemote: true,
+    );
+    final sourceBranches = availableBranches
+        .where((branch) => branch != currentBranch)
+        .toList();
+    if (sourceBranches.isEmpty) {
+      setState(() => _message = 'No other branches available to merge.');
+      return;
+    }
+
+    if (!mounted) return;
+    final sourceBranch = await showDialog<String>(
+      context: context,
+      builder: (_) => MergeIntoCurrentDialog(
+        currentBranch: currentBranch,
+        branches: sourceBranches,
+      ),
+    );
+    if (sourceBranch == null || sourceBranch.trim().isEmpty) return;
+
+    await _guarded(() async {
+      final activeBranch = await _refreshCurrentBranch(repo);
+      if (activeBranch != currentBranch) {
+        setState(() {
+          _message =
+              'Merge cancelled: current branch changed from $currentBranch to $activeBranch.';
+        });
+        return;
+      }
+
+      final activeUpstream = await _git.upstreamFor(repo.path, activeBranch);
+      final activeStatus = await _git.getBranchStatus(
+        repo.path,
+        activeUpstream,
+        fetch: false,
+      );
+      if (activeStatus.hasConflicts) {
+        setState(() {
+          _message = 'Resolve conflicts on $activeBranch before merging.';
+        });
+        return;
+      }
+      if (activeStatus.hasLocalChanges) {
+        final files = await _git.changedFiles(repo.path);
+        if (!mounted) return;
+        final commitRequest = await showDialog<CommitRequest>(
+          context: context,
+          builder: (_) => CommitDialog(
+            branchName: activeBranch,
+            files: files,
+            title: 'Commit changes before merge',
+            intro:
+                'Merging another branch needs a clean current branch. Commit these changes first.',
+            actionLabel: 'Commit And Merge',
+            initialMessage: 'Save $activeBranch changes',
+          ),
+        );
+        if (commitRequest == null) {
+          setState(() {
+            _message = 'Merge cancelled: local changes were not committed.';
+          });
+          return;
+        }
+        final commitResult = await _git.commitBranch(
+          worktreePath: repo.path,
+          branchName: activeBranch,
+          message: commitRequest.message,
+          description: commitRequest.description,
+          files: commitRequest.files,
+          amend: commitRequest.amend,
+        );
+        await _recordOperation(commitResult);
+        if (!commitResult.success) {
+          await _refreshTrackedBranches(repo);
+          return;
+        }
+      }
+
+      final result = await _git.mergeBranchIntoCurrent(
+        repoPath: repo.path,
+        currentBranch: currentBranch,
+        sourceBranch: sourceBranch,
+        onProgress: (message) async {
+          if (!mounted) return;
+          setState(() {
+            _message = 'Merge branch: $message';
+          });
+          await Future<void>.delayed(const Duration(milliseconds: 120));
+        },
+        onConflicts: (conflicts) async {
+          if (!mounted) return;
+          await showDialog<void>(
+            context: context,
+            builder: (_) => MergeConflictPreviewDialog(conflicts: conflicts),
+          );
+        },
+      );
+      await _recordOperation(result);
+      await _refreshCurrentBranch(repo);
+      await _refreshTrackedBranches(repo);
+      setState(() {
+        _message = result.success
+            ? 'Merged $sourceBranch into $currentBranch.'
+            : 'Merge failed: ${result.branchName} - ${result.summary}';
+      });
+    });
+  }
+
   Future<void> _restoreStartBranchAfterSync({
     required RepositoryInfo repo,
     required GitOperationResult syncResult,
@@ -1471,6 +1590,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                             selectedRepo,
                             selectedBranches,
                           ),
+                          onMergeIntoCurrent: () => _mergeBranchIntoCurrent(
+                            selectedRepo,
+                            currentBranch,
+                          ),
                           onRefresh: _refreshBranch,
                           onPull: _pullBranch,
                           onCheckout: _checkoutBranch,
@@ -1648,6 +1771,7 @@ class RepositoryDashboard extends StatelessWidget {
     required this.onToggleRightPanel,
     required this.onEditBranches,
     required this.onPullSelected,
+    required this.onMergeIntoCurrent,
     required this.onRefresh,
     required this.onPull,
     required this.onCheckout,
@@ -1698,6 +1822,7 @@ class RepositoryDashboard extends StatelessWidget {
   final VoidCallback onToggleRightPanel;
   final VoidCallback onEditBranches;
   final VoidCallback onPullSelected;
+  final VoidCallback onMergeIntoCurrent;
   final ValueChanged<TrackedBranch> onRefresh;
   final ValueChanged<TrackedBranch> onPull;
   final ValueChanged<TrackedBranch> onCheckout;
@@ -1924,6 +2049,17 @@ class RepositoryDashboard extends StatelessWidget {
                                 icon: const Icon(Icons.merge_type, size: 18),
                                 label: const Text(
                                   'Sync / Merge',
+                                  softWrap: false,
+                                ),
+                              ),
+                              OutlinedButton.icon(
+                                style: buttonStyle,
+                                onPressed: busy || currentBranch.isEmpty
+                                    ? null
+                                    : onMergeIntoCurrent,
+                                icon: const Icon(Icons.merge, size: 18),
+                                label: const Text(
+                                  'Merge Branch',
                                   softWrap: false,
                                 ),
                               ),
@@ -4307,6 +4443,109 @@ class SyncMergeDialog extends StatefulWidget {
 
   @override
   State<SyncMergeDialog> createState() => _SyncMergeDialogState();
+}
+
+class MergeIntoCurrentDialog extends StatefulWidget {
+  const MergeIntoCurrentDialog({
+    required this.currentBranch,
+    required this.branches,
+    super.key,
+  });
+
+  final String currentBranch;
+  final List<String> branches;
+
+  @override
+  State<MergeIntoCurrentDialog> createState() => _MergeIntoCurrentDialogState();
+}
+
+class _MergeIntoCurrentDialogState extends State<MergeIntoCurrentDialog> {
+  var _filter = '';
+  String? _selectedBranch;
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = widget.branches
+        .where((branch) => branch.toLowerCase().contains(_filter.toLowerCase()))
+        .toList();
+
+    return AlertDialog(
+      title: const Text('Merge Branch Into Current'),
+      content: SizedBox(
+        width: 520,
+        height: 520,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Current branch: ${widget.currentBranch}',
+              style: TextStyle(
+                color: primaryTextColor(context),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Select one branch. The app will pull that branch, check conflicts, then merge it into the current branch.',
+              style: TextStyle(color: mutedTextColor(context)),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              decoration: const InputDecoration(
+                prefixIcon: Icon(Icons.search),
+                labelText: 'Filter branches',
+              ),
+              onChanged: (value) => setState(() => _filter = value),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: filtered.isEmpty
+                  ? Center(
+                      child: Text(
+                        'No branches found.',
+                        style: TextStyle(color: mutedTextColor(context)),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: filtered.length,
+                      itemBuilder: (context, index) {
+                        final branch = filtered[index];
+                        final selected = _selectedBranch == branch;
+                        return ListTile(
+                          title: Text(branch, overflow: TextOverflow.ellipsis),
+                          leading: const Icon(Icons.account_tree_outlined),
+                          trailing: selected
+                              ? Icon(
+                                  Icons.check_circle,
+                                  color: Theme.of(context).colorScheme.primary,
+                                )
+                              : null,
+                          selected: selected,
+                          onTap: () {
+                            setState(() => _selectedBranch = branch);
+                          },
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          onPressed: _selectedBranch == null
+              ? null
+              : () => Navigator.of(context).pop(_selectedBranch),
+          icon: const Icon(Icons.merge),
+          label: Text('Merge into ${widget.currentBranch}'),
+        ),
+      ],
+    );
+  }
 }
 
 class MergeConflictPreviewDialog extends StatelessWidget {
