@@ -426,8 +426,11 @@ class GitService {
       );
       if (!checkout.success) return false;
 
-      final revision = await _branchRevision(repoPath, source);
-      final merge = await _run(['merge', '--no-edit', revision], repoPath);
+      final merge = await _mergeBranchWithMessage(
+        repoPath: repoPath,
+        sourceBranch: source,
+        targetBranch: target,
+      );
       combined = _combine(combined, merge);
       return merge.success;
     }
@@ -569,8 +572,11 @@ class GitService {
     Future<bool> mergeInto(String target, String source) async {
       await onStep?.call(SyncMergeStep(fromBranch: source, toBranch: target));
       if (!await checkoutClean(target)) return false;
-      final revision = await _branchRevision(repoPath, source);
-      final merge = await _run(['merge', '--no-edit', revision], repoPath);
+      final merge = await _mergeBranchWithMessage(
+        repoPath: repoPath,
+        sourceBranch: source,
+        targetBranch: target,
+      );
       combined = _combine(combined, merge);
       if (!merge.success) return false;
 
@@ -915,7 +921,11 @@ class GitService {
       }
     }
 
-    final merge = await _run(['merge', '--no-edit', revision], repoPath);
+    final merge = await _mergeBranchWithMessage(
+      repoPath: repoPath,
+      sourceBranch: sourceBranch,
+      targetBranch: currentBranch,
+    );
     combined = _combine(combined, merge);
 
     return _resultFromProcess(
@@ -1364,6 +1374,22 @@ class GitService {
     final remoteBranch = await _remoteBranchFor(repoPath, branchName);
     if (remoteBranch.isNotEmpty) return remoteBranch;
     return branchName;
+  }
+
+  Future<_GitProcessResult> _mergeBranchWithMessage({
+    required String repoPath,
+    required String sourceBranch,
+    required String targetBranch,
+  }) {
+    final message = "Merge branch '$sourceBranch' into $targetBranch";
+    return _run([
+      'merge',
+      '--no-ff',
+      '--no-edit',
+      '-m',
+      message,
+      sourceBranch,
+    ], repoPath);
   }
 
   Future<List<String>> _conflictedFiles(String repoPath) async {

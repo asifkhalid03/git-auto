@@ -370,6 +370,15 @@ void main() {
         reason: '$branch should receive branch-b pulled changes',
       );
     }
+    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
+    final mergeMessage = await _runGit(
+      ['log', '-1', '--pretty=%s'],
+      fixture.repoDir.path,
+    );
+    expect(
+      mergeMessage.stdout.trim(),
+      "Merge branch 'branch-b' into branch-a",
+    );
   });
 
   test(
@@ -533,6 +542,14 @@ void main() {
         'Checking out branch-a',
         'Merging branch-b into branch-a',
       ]),
+    );
+    final mergeMessage = await _runGit(
+      ['log', '-1', '--pretty=%s'],
+      fixture.repoDir.path,
+    );
+    expect(
+      mergeMessage.stdout.trim(),
+      "Merge branch 'branch-b' into branch-a",
     );
   });
 
