@@ -75,6 +75,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   final _currentChangedFiles = <String, List<String>>{};
   final _visibleCommitDrafts = <String, CommitDraft>{};
   final _lastCommitDrafts = <String, CommitDraft>{};
+  final _busyRepoIds = <String>{};
+  final _repoMessages = <String, String>{};
+  final _repoLastOperations = <String, GitOperationResult>{};
+  final _repoSyncAnimations = <String, SyncAnimationState>{};
   RepositoryInfo? _selectedRepo;
   var _loading = true;
   var _busy = false;
@@ -88,7 +92,6 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   String? _message;
   String? _updateError;
   ReleaseInfo? _latestRelease;
-  SyncAnimationState? _syncAnimation;
   Timer? _autoRefreshTimer;
   var _commitDraftRevision = 0;
 
@@ -196,7 +199,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     String description,
     bool amend,
   ) async {
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       final result = await _git.commitBranch(
         worktreePath: repo.path,
@@ -206,7 +209,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         files: files,
         amend: amend,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       if (result.success) {
         _rememberCommittedDraft(repo.id, currentBranch, message, description);
       }
@@ -251,6 +254,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       _currentBranches.remove(repo.id);
       _commitHistory.remove(repo.id);
       _currentChangedFiles.remove(repo.id);
+      _busyRepoIds.remove(repo.id);
+      _repoMessages.remove(repo.id);
+      _repoLastOperations.remove(repo.id);
+      _repoSyncAnimations.remove(repo.id);
       _selectedRepo = _repositories.firstOrNull;
       _message = '${repo.name} removed from workspaces.';
     });
@@ -373,14 +380,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     );
     if (confirmed != true) return;
 
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       final result = await _git.discardFiles(
         worktreePath: repo.path,
         branchName: currentBranch,
         files: files,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
     });
@@ -733,29 +740,30 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     return p.equals(child, parent) || p.isWithin(parent, child);
   }
 
-  Future<void> _refreshBranch(TrackedBranch branch) async {
-    await _guarded(() async {
-      final currentBranch = await _refreshCurrentBranch(_selectedRepo!);
-      final upstream = await _git.upstreamFor(
-        _selectedRepo!.path,
-        branch.branchName,
-      );
-      final status = await _git.getBranchStatus(
-        _selectedRepo!.path,
-        upstream,
-        revision: branch.branchName == currentBranch
-            ? 'HEAD'
-            : branch.branchName,
-        includeWorkingTree: branch.branchName == currentBranch,
-      );
-      _replaceBranch(branch.copyWith(upstream: upstream, lastStatus: status));
-      await _save();
+  Future<void> _refreshBranch(RepositoryInfo repo, TrackedBranch branch) async {
+    await _guardedRepo(repo, () async {
+      await _refreshBranchStatus(repo, branch);
     });
   }
 
-  Future<void> _pullBranch(TrackedBranch branch) async {
-    await _guarded(() async {
-      final repo = _selectedRepo!;
+  Future<void> _refreshBranchStatus(
+    RepositoryInfo repo,
+    TrackedBranch branch,
+  ) async {
+    final currentBranch = await _refreshCurrentBranch(repo);
+    final upstream = await _git.upstreamFor(repo.path, branch.branchName);
+    final status = await _git.getBranchStatus(
+      repo.path,
+      upstream,
+      revision: branch.branchName == currentBranch ? 'HEAD' : branch.branchName,
+      includeWorkingTree: branch.branchName == currentBranch,
+    );
+    _replaceBranch(branch.copyWith(upstream: upstream, lastStatus: status));
+    await _save();
+  }
+
+  Future<void> _pullBranch(RepositoryInfo repo, TrackedBranch branch) async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       if (branch.branchName != currentBranch) {
         final failure = GitOperationResult(
@@ -767,11 +775,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           startedAt: DateTime.now(),
           finishedAt: DateTime.now(),
         );
-        await _recordOperation(failure);
+        await _recordOperation(failure, repo: repo);
         return;
       }
       final result = await _git.pullBranch(repo.path, branch.upstream);
-      await _recordOperation(result.copyBranch(branch.branchName));
+      await _recordOperation(result.copyBranch(branch.branchName), repo: repo);
       final status = await _git.getBranchStatus(repo.path, branch.upstream);
       _replaceBranch(
         branch.copyWith(
@@ -783,9 +791,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     });
   }
 
-  Future<void> _pushBranch(TrackedBranch branch) async {
-    await _guarded(() async {
-      final repo = _selectedRepo!;
+  Future<void> _pushBranch(RepositoryInfo repo, TrackedBranch branch) async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       if (branch.branchName != currentBranch) {
         final failure = GitOperationResult(
@@ -797,13 +804,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           startedAt: DateTime.now(),
           finishedAt: DateTime.now(),
         );
-        await _recordOperation(failure);
+        await _recordOperation(failure, repo: repo);
         return;
       }
       final checksPassed = await _runPrePushCommands(repo);
       if (!checksPassed) {
         setState(() {
-          _message = 'Push cancelled: pre-push checks failed.';
+          _repoMessages[repo.id] = 'Push cancelled: pre-push checks failed.';
         });
         return;
       }
@@ -811,7 +818,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         worktreePath: repo.path,
         branchName: branch.branchName,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       if (result.success) {
         _clearCommittedDraft(repo.id, branch.branchName);
       }
@@ -822,8 +829,10 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     });
   }
 
-  Future<void> _checkoutBranch(TrackedBranch branch) async {
-    final repo = _selectedRepo!;
+  Future<void> _checkoutBranch(
+    RepositoryInfo repo,
+    TrackedBranch branch,
+  ) async {
     final currentBranch = await _refreshCurrentBranch(repo);
     final currentTrackedBranch = _branches
         .where(
@@ -848,24 +857,26 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       allowDirty = true;
     }
 
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final result = await _git.checkoutBranch(
         repoPath: repo.path,
         branchName: branch.branchName,
         allowDirty: allowDirty,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       final current = await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
       if (result.success) {
-        setState(() => _message = 'Checked out $current');
+        setState(() => _repoMessages[repo.id] = 'Checked out $current');
       }
     });
   }
 
-  Future<void> _undoLastCommit(TrackedBranch branch) async {
-    await _guarded(() async {
-      final repo = _selectedRepo!;
+  Future<void> _undoLastCommit(
+    RepositoryInfo repo,
+    TrackedBranch branch,
+  ) async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       if (branch.branchName != currentBranch) {
         final failure = GitOperationResult(
@@ -877,14 +888,14 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           startedAt: DateTime.now(),
           finishedAt: DateTime.now(),
         );
-        await _recordOperation(failure);
+        await _recordOperation(failure, repo: repo);
         return;
       }
       final result = await _git.undoLastCommit(
         repoPath: repo.path,
         branchName: branch.branchName,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       if (result.success) {
         _restoreCommittedDraft(repo.id, branch.branchName);
       }
@@ -892,13 +903,12 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     });
   }
 
-  Future<void> _commitBranch(TrackedBranch branch) async {
-    await _guarded(() async {
-      final repo = _selectedRepo!;
+  Future<void> _commitBranch(RepositoryInfo repo, TrackedBranch branch) async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       if (branch.branchName != currentBranch) {
         setState(() {
-          _message =
+          _repoMessages[repo.id] =
               'Commit is only allowed on the current branch: $currentBranch';
         });
         return;
@@ -929,7 +939,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         files: request.files,
         amend: request.amend,
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       if (result.success) {
         _rememberCommittedDraft(
           repo.id,
@@ -938,7 +948,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           request.description,
         );
       }
-      await _refreshBranch(branch);
+      await _refreshBranchStatus(repo, branch);
     });
   }
 
@@ -948,7 +958,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     String currentBranch,
   ) async {
     if (branches.length < 2) {
-      setState(() => _message = 'Select at least two branches to sync.');
+      setState(() {
+        _repoMessages[repo.id] = 'Select at least two branches to sync.';
+      });
       return;
     }
 
@@ -961,7 +973,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     );
     if (request == null) return;
 
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final activeBranch = await _refreshCurrentBranch(repo);
       final activeUpstream = await _git.upstreamFor(repo.path, activeBranch);
       final activeStatus = await _git.getBranchStatus(
@@ -972,7 +984,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       var committedCurrentBranch = false;
       if (activeStatus.hasConflicts) {
         setState(() {
-          _message = 'Resolve conflicts on $activeBranch before syncing.';
+          _repoMessages[repo.id] =
+              'Resolve conflicts on $activeBranch before syncing.';
         });
         return;
       }
@@ -993,7 +1006,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         );
         if (commitRequest == null) {
           setState(() {
-            _message = 'Sync cancelled: local changes were not committed.';
+            _repoMessages[repo.id] =
+                'Sync cancelled: local changes were not committed.';
           });
           return;
         }
@@ -1005,7 +1019,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           files: commitRequest.files,
           amend: commitRequest.amend,
         );
-        await _recordOperation(commitResult);
+        await _recordOperation(commitResult, repo: repo);
         await _refreshTrackedBranches(repo);
         if (!commitResult.success) return;
         committedCurrentBranch = true;
@@ -1014,7 +1028,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       final checksPassed = await _runPrePushCommands(repo, actionName: 'sync');
       if (!checksPassed) {
         setState(() {
-          _message = 'Sync cancelled: pre-sync checks did not pass.';
+          _repoMessages[repo.id] =
+              'Sync cancelled: pre-sync checks did not pass.';
         });
         return;
       }
@@ -1023,12 +1038,12 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           worktreePath: repo.path,
           branchName: activeBranch,
         );
-        await _recordOperation(pushCurrentResult);
+        await _recordOperation(pushCurrentResult, repo: repo);
         if (!pushCurrentResult.success) {
           await _refreshCurrentBranch(repo);
           await _refreshTrackedBranches(repo);
           setState(() {
-            _message =
+            _repoMessages[repo.id] =
                 'Sync cancelled: push failed after committing $activeBranch.';
           });
           return;
@@ -1050,7 +1065,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         await _refreshCurrentBranch(repo);
         await _refreshTrackedBranches(repo);
         setState(() {
-          _message =
+          _repoMessages[repo.id] =
               'Sync cancelled: ${conflictPreviews.length} merge conflict ${conflictPreviews.length == 1 ? 'check' : 'checks'} failed.';
         });
         return;
@@ -1058,7 +1073,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
 
       if (!mounted) return;
       setState(() {
-        _syncAnimation = SyncAnimationState(
+        _repoSyncAnimations[repo.id] = SyncAnimationState(
           targetBranch: request.targetBranch,
           sourceBranches: request.sourceBranches,
           bothDirections: request.bothDirections,
@@ -1076,8 +1091,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           onStep: (step) async {
             if (!mounted) return;
             setState(() {
-              final previous = _syncAnimation;
-              _syncAnimation = SyncAnimationState(
+              final previous = _repoSyncAnimations[repo.id];
+              _repoSyncAnimations[repo.id] = SyncAnimationState(
                 targetBranch: request.targetBranch,
                 sourceBranches: request.sourceBranches,
                 bothDirections: request.bothDirections,
@@ -1099,7 +1114,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
             await Future<void>.delayed(const Duration(milliseconds: 260));
           },
         );
-        await _recordOperation(result);
+        await _recordOperation(result, repo: repo);
         await _restoreStartBranchAfterSync(
           repo: repo,
           syncResult: result,
@@ -1111,7 +1126,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       } finally {
         await Future<void>.delayed(const Duration(milliseconds: 450));
         if (mounted) {
-          setState(() => _syncAnimation = null);
+          setState(() => _repoSyncAnimations.remove(repo.id));
         }
       }
     });
@@ -1122,11 +1137,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     List<TrackedBranch> branches,
   ) async {
     if (branches.isEmpty) {
-      setState(() => _message = 'Select at least one branch to pull.');
+      setState(() {
+        _repoMessages[repo.id] = 'Select at least one branch to pull.';
+      });
       return;
     }
 
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final currentBranch = await _refreshCurrentBranch(repo);
       final activeUpstream = await _git.upstreamFor(repo.path, currentBranch);
       final activeStatus = await _git.getBranchStatus(
@@ -1136,7 +1153,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       );
       if (activeStatus.hasConflicts) {
         setState(() {
-          _message = 'Resolve conflicts on $currentBranch before pulling.';
+          _repoMessages[repo.id] =
+              'Resolve conflicts on $currentBranch before pulling.';
         });
         return;
       }
@@ -1157,7 +1175,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         );
         if (commitRequest == null) {
           setState(() {
-            _message = 'Pull cancelled: local changes were not committed.';
+            _repoMessages[repo.id] =
+                'Pull cancelled: local changes were not committed.';
           });
           return;
         }
@@ -1169,7 +1188,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           files: commitRequest.files,
           amend: commitRequest.amend,
         );
-        await _recordOperation(commitResult);
+        await _recordOperation(commitResult, repo: repo);
         if (!commitResult.success) {
           await _refreshTrackedBranches(repo);
           return;
@@ -1183,16 +1202,16 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         onProgress: (message) async {
           if (!mounted) return;
           setState(() {
-            _message = 'Pull selected: $message';
+            _repoMessages[repo.id] = 'Pull selected: $message';
           });
           await Future<void>.delayed(const Duration(milliseconds: 120));
         },
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
       setState(() {
-        _message = result.success
+        _repoMessages[repo.id] = result.success
             ? 'Pulled selected branches. Switched back to $currentBranch.'
             : 'Pull selected failed: ${result.branchName} - ${result.summary}';
       });
@@ -1204,7 +1223,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     String currentBranch,
   ) async {
     if (currentBranch.isEmpty) {
-      setState(() => _message = 'No current branch selected.');
+      setState(() => _repoMessages[repo.id] = 'No current branch selected.');
       return;
     }
 
@@ -1216,7 +1235,9 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         .where((branch) => branch != currentBranch)
         .toList();
     if (sourceBranches.isEmpty) {
-      setState(() => _message = 'No other branches available to merge.');
+      setState(() {
+        _repoMessages[repo.id] = 'No other branches available to merge.';
+      });
       return;
     }
 
@@ -1230,11 +1251,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     );
     if (sourceBranch == null || sourceBranch.trim().isEmpty) return;
 
-    await _guarded(() async {
+    await _guardedRepo(repo, () async {
       final activeBranch = await _refreshCurrentBranch(repo);
       if (activeBranch != currentBranch) {
         setState(() {
-          _message =
+          _repoMessages[repo.id] =
               'Merge cancelled: current branch changed from $currentBranch to $activeBranch.';
         });
         return;
@@ -1248,7 +1269,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       );
       if (activeStatus.hasConflicts) {
         setState(() {
-          _message = 'Resolve conflicts on $activeBranch before merging.';
+          _repoMessages[repo.id] =
+              'Resolve conflicts on $activeBranch before merging.';
         });
         return;
       }
@@ -1269,7 +1291,8 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         );
         if (commitRequest == null) {
           setState(() {
-            _message = 'Merge cancelled: local changes were not committed.';
+            _repoMessages[repo.id] =
+                'Merge cancelled: local changes were not committed.';
           });
           return;
         }
@@ -1281,7 +1304,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           files: commitRequest.files,
           amend: commitRequest.amend,
         );
-        await _recordOperation(commitResult);
+        await _recordOperation(commitResult, repo: repo);
         if (!commitResult.success) {
           await _refreshTrackedBranches(repo);
           return;
@@ -1295,7 +1318,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         onProgress: (message) async {
           if (!mounted) return;
           setState(() {
-            _message = 'Merge branch: $message';
+            _repoMessages[repo.id] = 'Merge branch: $message';
           });
           await Future<void>.delayed(const Duration(milliseconds: 120));
         },
@@ -1307,11 +1330,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           );
         },
       );
-      await _recordOperation(result);
+      await _recordOperation(result, repo: repo);
       await _refreshCurrentBranch(repo);
       await _refreshTrackedBranches(repo);
       setState(() {
-        _message = result.success
+        _repoMessages[repo.id] = result.success
             ? 'Merged $sourceBranch into $currentBranch.'
             : 'Merge failed: ${result.branchName} - ${result.summary}';
       });
@@ -1336,7 +1359,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     final currentBranch = await _refreshCurrentBranch(repo);
     if (currentBranch == restoreBranch) {
       setState(() {
-        _message = '$prefix Current branch is $restoreBranch.';
+        _repoMessages[repo.id] = '$prefix Current branch is $restoreBranch.';
       });
       return;
     }
@@ -1346,11 +1369,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       branchName: restoreBranch,
     );
     if (!restore.success) {
-      await _recordOperation(restore);
+      await _recordOperation(restore, repo: repo);
       return;
     }
     setState(() {
-      _message = '$prefix Switched back to $restoreBranch.';
+      _repoMessages[repo.id] = '$prefix Switched back to $restoreBranch.';
     });
   }
 
@@ -1395,7 +1418,13 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
 
   Future<void> _autoRefreshSelectedRepo() async {
     final repo = _selectedRepo;
-    if (!mounted || repo == null || _busy || _autoRefreshing) return;
+    if (!mounted ||
+        repo == null ||
+        _busy ||
+        _busyRepoIds.contains(repo.id) ||
+        _autoRefreshing) {
+      return;
+    }
     final hasTrackedBranches = _branches.any(
       (branch) => branch.repoId == repo.id,
     );
@@ -1411,10 +1440,19 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     }
   }
 
-  Future<void> _recordOperation(GitOperationResult result) async {
+  Future<void> _recordOperation(
+    GitOperationResult result, {
+    RepositoryInfo? repo,
+  }) async {
+    final message = _operationMessage(result);
     setState(() {
       _operations = [result, ..._operations].take(25).toList();
-      _message = _operationMessage(result);
+      if (repo == null) {
+        _message = message;
+      } else {
+        _repoLastOperations[repo.id] = result;
+        _repoMessages[repo.id] = message;
+      }
     });
     await _save();
   }
@@ -1472,7 +1510,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         ..._branches.where((branch) => branch.repoId != repo.id),
         ...repoBranches,
       ];
-      _message = 'Branch order saved.';
+      _repoMessages[repo.id] = 'Branch order saved.';
     });
     await _save();
   }
@@ -1491,6 +1529,34 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     } finally {
       if (mounted) {
         setState(() => _busy = false);
+      }
+    }
+  }
+
+  Future<void> _guardedRepo(
+    RepositoryInfo repo,
+    Future<void> Function() action,
+  ) async {
+    if (_busyRepoIds.contains(repo.id)) {
+      setState(() {
+        _repoMessages[repo.id] =
+            '${repo.name} already has an operation running.';
+      });
+      return;
+    }
+    setState(() {
+      _busyRepoIds.add(repo.id);
+      _repoMessages.remove(repo.id);
+    });
+    try {
+      await action();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _repoMessages[repo.id] = error.toString());
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _busyRepoIds.remove(repo.id));
       }
     }
   }
@@ -1515,6 +1581,19 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           branch.branchName == currentBranch &&
           (branch.lastStatus?.hasLocalChanges ?? false),
     );
+    final selectedRepoBusy =
+        selectedRepo != null && _busyRepoIds.contains(selectedRepo.id);
+    final selectedRepoOperation = selectedRepo == null
+        ? null
+        : _repoLastOperations[selectedRepo.id];
+    final selectedRepoOperations = selectedRepoOperation == null
+        ? _operations
+        : [
+            selectedRepoOperation,
+            ..._operations.where(
+              (operation) => operation != selectedRepoOperation,
+            ),
+          ];
 
     return Scaffold(
       body: SafeArea(
@@ -1551,15 +1630,15 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                           commitDraftRevision: _commitDraftRevision,
                           repositories: _repositories,
                           branches: selectedBranches,
-                          operations: _operations,
-                          message: _message,
-                          busy: _busy,
+                          operations: selectedRepoOperations,
+                          message: _repoMessages[selectedRepo.id] ?? _message,
+                          busy: _busy || selectedRepoBusy,
                           latestRelease: _latestRelease,
                           checkingUpdates: _checkingUpdates,
                           autoCheckUpdates: _autoCheckUpdates,
                           darkMode: _darkMode,
                           updateError: _updateError,
-                          syncAnimation: _syncAnimation,
+                          syncAnimation: _repoSyncAnimations[selectedRepo.id],
                           checkoutBlocked: checkoutBlocked,
                           leftPanelCollapsed: _leftPanelCollapsed,
                           rightPanelCollapsed: _rightPanelCollapsed,
@@ -1594,12 +1673,16 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                             selectedRepo,
                             currentBranch,
                           ),
-                          onRefresh: _refreshBranch,
-                          onPull: _pullBranch,
-                          onCheckout: _checkoutBranch,
-                          onCommit: _commitBranch,
-                          onPush: _pushBranch,
-                          onUndoCommit: _undoLastCommit,
+                          onRefresh: (branch) =>
+                              _refreshBranch(selectedRepo, branch),
+                          onPull: (branch) => _pullBranch(selectedRepo, branch),
+                          onCheckout: (branch) =>
+                              _checkoutBranch(selectedRepo, branch),
+                          onCommit: (branch) =>
+                              _commitBranch(selectedRepo, branch),
+                          onPush: (branch) => _pushBranch(selectedRepo, branch),
+                          onUndoCommit: (branch) =>
+                              _undoLastCommit(selectedRepo, branch),
                           onShowFileDiff: (file) =>
                               _showCurrentFileDiff(selectedRepo, file),
                           onCommitFiles: (files, message, description, amend) =>
@@ -1623,7 +1706,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
                 ),
               ),
             ),
-            if (_busy)
+            if (_busy || selectedRepoBusy)
               const Positioned(
                 top: 20,
                 right: 20,
