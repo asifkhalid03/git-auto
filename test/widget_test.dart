@@ -84,4 +84,31 @@ void main() {
     expect(compareVersions('v1.0.2', '1.0.2'), 0);
     expect(compareVersions('1.0.1', '1.0.2'), lessThan(0));
   });
+
+  test('preferredAsset chooses installer matching release version', () {
+    const release = ReleaseInfo(
+      version: '1.0.19',
+      url: 'https://example.test/releases/v1.0.19',
+      publishedAt: null,
+      assets: [
+        ReleaseAsset(
+          name: 'GitFlowSetup-v1.0.14.exe',
+          downloadUrl: 'https://example.test/GitFlowSetup-v1.0.14.exe',
+          size: 11,
+        ),
+        ReleaseAsset(
+          name: 'GitFlowSetup-v1.0.19.exe',
+          downloadUrl: 'https://example.test/GitFlowSetup-v1.0.19.exe',
+          size: 12,
+        ),
+        ReleaseAsset(
+          name: 'git_flow_windows_x64_release.zip',
+          downloadUrl: 'https://example.test/git_flow_windows_x64_release.zip',
+          size: 13,
+        ),
+      ],
+    );
+
+    expect(release.preferredAsset?.name, 'GitFlowSetup-v1.0.19.exe');
+  });
 }

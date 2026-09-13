@@ -1380,7 +1380,24 @@ class GitService {
     required String repoPath,
     required String sourceBranch,
     required String targetBranch,
-  }) {
+  }) async {
+    final diff = await _run([
+      'diff',
+      '--quiet',
+      'HEAD',
+      sourceBranch,
+      '--',
+    ], repoPath);
+    if (diff.exitCode == 0) {
+      return _GitProcessResult(
+        exitCode: 0,
+        stdout:
+            'No file changes from $sourceBranch into $targetBranch. Merge skipped.',
+        stderr: '',
+      );
+    }
+    if (diff.exitCode > 1) return diff;
+
     final message = "Merge branch '$sourceBranch' into $targetBranch";
     return _run([
       'merge',

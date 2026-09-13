@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-const appVersion = '1.0.19';
+const appVersion = '1.0.20';
 
 class UpdateDownloadProgress {
   const UpdateDownloadProgress({
@@ -35,6 +35,8 @@ class ReleaseInfo {
   bool get isNewerThanCurrent => compareVersions(version, appVersion) > 0;
 
   ReleaseAsset? get preferredAsset {
+    final releaseToken = 'v${version.toLowerCase()}';
+    final versionToken = version.toLowerCase();
     final candidates = assets.where((asset) {
       final name = asset.name.toLowerCase();
       return asset.downloadUrl.isNotEmpty &&
@@ -48,20 +50,35 @@ class ReleaseInfo {
     candidates.sort((a, b) {
       int score(ReleaseAsset asset) {
         final name = asset.name.toLowerCase();
+        if (name.contains(releaseToken) || name.contains(versionToken)) {
+          if (Platform.isWindows &&
+              name.endsWith('.exe') &&
+              (name.contains('setup') || name.contains('installer'))) {
+            return 0;
+          }
+          if (Platform.isWindows && name.endsWith('.msi')) return 1;
+          if (Platform.isWindows &&
+              name.endsWith('.zip') &&
+              (name.contains('windows') || name.contains('win'))) {
+            return 2;
+          }
+          if (Platform.isWindows && name.endsWith('.exe')) return 3;
+          if (name.endsWith('.zip')) return 4;
+        }
         if (Platform.isWindows &&
             name.endsWith('.exe') &&
             (name.contains('setup') || name.contains('installer'))) {
-          return 0;
+          return 10;
         }
-        if (Platform.isWindows && name.endsWith('.msi')) return 0;
+        if (Platform.isWindows && name.endsWith('.msi')) return 11;
         if (Platform.isWindows &&
             name.endsWith('.zip') &&
             (name.contains('windows') || name.contains('win'))) {
-          return 1;
+          return 12;
         }
-        if (Platform.isWindows && name.endsWith('.exe')) return 2;
-        if (name.endsWith('.zip')) return 3;
-        return 4;
+        if (Platform.isWindows && name.endsWith('.exe')) return 13;
+        if (name.endsWith('.zip')) return 14;
+        return 15;
       }
 
       return score(a).compareTo(score(b));
