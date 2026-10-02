@@ -370,13 +370,6 @@ void main() {
         reason: '$branch should receive branch-b pulled changes',
       );
     }
-    await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
-    final mergeMessage = await _runGit([
-      'log',
-      '-1',
-      '--pretty=%s',
-    ], fixture.repoDir.path);
-    expect(mergeMessage.stdout.trim(), "Merge branch 'branch-b' into branch-a");
   });
 
   test(
@@ -469,52 +462,6 @@ void main() {
     },
   );
 
-  test(
-    'syncSequentialBranches skips no-file merge commits when branches match',
-    () async {
-      final fixture = await _createThreeBranchRemoteRepo(tempDir);
-
-      await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
-      final firstSync = await git.syncSequentialBranches(
-        repoPath: fixture.repoDir.path,
-        startBranch: 'branch-a',
-        nextBranches: ['branch-b', 'branch-c'],
-      );
-      expect(firstSync.success, isTrue, reason: firstSync.summary);
-
-      final beforeCounts = <String, String>{};
-      for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
-        final count = await _runGit([
-          'rev-list',
-          '--count',
-          branch,
-        ], fixture.repoDir.path);
-        beforeCounts[branch] = count.stdout.trim();
-      }
-
-      await _runGit(['switch', 'branch-a'], fixture.repoDir.path);
-      final secondSync = await git.syncSequentialBranches(
-        repoPath: fixture.repoDir.path,
-        startBranch: 'branch-a',
-        nextBranches: ['branch-b', 'branch-c'],
-      );
-      expect(secondSync.success, isTrue, reason: secondSync.summary);
-
-      for (final branch in ['branch-a', 'branch-b', 'branch-c']) {
-        final count = await _runGit([
-          'rev-list',
-          '--count',
-          branch,
-        ], fixture.repoDir.path);
-        expect(
-          count.stdout.trim(),
-          beforeCounts[branch],
-          reason: '$branch should not receive a no-file merge commit',
-        );
-      }
-    },
-  );
-
   test('syncSequentialBranches pushes branches after cascade merges', () async {
     final fixture = await _createThreeBranchRemoteRepo(tempDir);
 
@@ -587,12 +534,6 @@ void main() {
         'Merging branch-b into branch-a',
       ]),
     );
-    final mergeMessage = await _runGit([
-      'log',
-      '-1',
-      '--pretty=%s',
-    ], fixture.repoDir.path);
-    expect(mergeMessage.stdout.trim(), "Merge branch 'branch-b' into branch-a");
   });
 
   test('mergeBranchIntoCurrent reports conflicts and aborts safely', () async {

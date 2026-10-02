@@ -426,10 +426,9 @@ class GitService {
       );
       if (!checkout.success) return false;
 
-      final merge = await _mergeBranchWithMessage(
+      final merge = await _mergeBranch(
         repoPath: repoPath,
         sourceBranch: source,
-        targetBranch: target,
       );
       combined = _combine(combined, merge);
       return merge.success;
@@ -572,10 +571,9 @@ class GitService {
     Future<bool> mergeInto(String target, String source) async {
       await onStep?.call(SyncMergeStep(fromBranch: source, toBranch: target));
       if (!await checkoutClean(target)) return false;
-      final merge = await _mergeBranchWithMessage(
+      final merge = await _mergeBranch(
         repoPath: repoPath,
         sourceBranch: source,
-        targetBranch: target,
       );
       combined = _combine(combined, merge);
       if (!merge.success) return false;
@@ -921,10 +919,9 @@ class GitService {
       }
     }
 
-    final merge = await _mergeBranchWithMessage(
+    final merge = await _mergeBranch(
       repoPath: repoPath,
       sourceBranch: sourceBranch,
-      targetBranch: currentBranch,
     );
     combined = _combine(combined, merge);
 
@@ -1376,38 +1373,10 @@ class GitService {
     return branchName;
   }
 
-  Future<_GitProcessResult> _mergeBranchWithMessage({
+  Future<_GitProcessResult> _mergeBranch({
     required String repoPath,
     required String sourceBranch,
-    required String targetBranch,
-  }) async {
-    final diff = await _run([
-      'diff',
-      '--quiet',
-      'HEAD',
-      sourceBranch,
-      '--',
-    ], repoPath);
-    if (diff.exitCode == 0) {
-      return _GitProcessResult(
-        exitCode: 0,
-        stdout:
-            'No file changes from $sourceBranch into $targetBranch. Merge skipped.',
-        stderr: '',
-      );
-    }
-    if (diff.exitCode > 1) return diff;
-
-    final message = "Merge branch '$sourceBranch' into $targetBranch";
-    return _run([
-      'merge',
-      '--no-ff',
-      '--no-edit',
-      '-m',
-      message,
-      sourceBranch,
-    ], repoPath);
-  }
+  }) => _run(['merge', sourceBranch], repoPath);
 
   Future<List<String>> _conflictedFiles(String repoPath) async {
     final result = await _run([
