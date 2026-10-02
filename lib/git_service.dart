@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'models.dart';
+import 'github_credentials.dart';
 
 class SyncMergeStep {
   const SyncMergeStep({required this.fromBranch, required this.toBranch});
@@ -26,6 +27,8 @@ class MergeConflictPreview {
 }
 
 class GitService {
+  final _credentials = GitHubCredentials();
+
   Future<RepositoryInfo> validateRepository({
     required String path,
     required String id,
@@ -202,7 +205,7 @@ class GitService {
   Future<BranchStatus> getBranchStatus(
     String worktreePath,
     String upstream, {
-    bool fetch = true,
+    bool fetch = false,
     String revision = 'HEAD',
     bool includeWorkingTree = true,
   }) async {
@@ -324,7 +327,6 @@ class GitService {
       );
     }
 
-    await _run(['fetch', '--all', '--prune'], repoPath);
     final status = await _run(['status', '--porcelain=v1'], repoPath);
     if (!status.success) {
       return _resultFromProcess('checkout', branchName, status, startedAt);
@@ -407,8 +409,10 @@ class GitService {
       );
     }
 
-    await _run(['fetch', '--all', '--prune'], repoPath);
-    var combined = _GitProcessResult(exitCode: 0, stdout: '', stderr: '');
+    var combined = await _run(['fetch', '--all', '--prune'], repoPath);
+    if (!combined.success) {
+      return _resultFromProcess('sync', targetBranch, combined, startedAt);
+    }
 
     Future<bool> mergeInto(String target, String source) async {
       await onStep?.call(SyncMergeStep(fromBranch: source, toBranch: target));
@@ -1420,7 +1424,9 @@ class GitService {
       return _GitProcessResult(
         exitCode: 1,
         stdout: '',
-        stderr: 'Branch $branchName was not found locally or on a remote.',
+        stderr:
+            'Branch $branchName was not found locally or in cached remote branches. '
+            'Fetch branches from Select Branches, then try again.',
       );
     }
     return _run([
@@ -1461,6 +1467,11 @@ class GitService {
     List<String> args,
     String workingDirectory,
   ) async {
+    try {
+      await _credentials.prepare(workingDirectory, args);
+    } on GitHubCredentialException catch (error) {
+      return _GitProcessResult(exitCode: 1, stdout: '', stderr: error.message);
+    }
     final gitArgs = Platform.isWindows
         ? ['-c', 'core.longpaths=true', ...args]
         : args;

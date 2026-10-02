@@ -461,6 +461,114 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     await _openUrl(url);
   }
 
+  bool _isGitAccessFailure(GitOperationResult result) {
+    final output = '${result.stderr}\n${result.stdout}'.toLowerCase();
+    return output.contains('repository not found') ||
+        output.contains('authentication failed') ||
+        output.contains('permission denied') ||
+        output.contains('access denied') ||
+        output.contains('could not read username') ||
+        output.contains('not have permission') ||
+        output.contains('support for password authentication was removed') ||
+        output.contains('the requested url returned error: 403') ||
+        output.contains('fatal: unable to access');
+  }
+
+  Future<bool> _openAccessPageForFailure(
+    RepositoryInfo repo,
+    GitOperationResult result,
+  ) async {
+    if (result.success || !_isGitAccessFailure(result)) return false;
+    final url = _githubAccessUrl(repo.remoteUrl);
+    if (url == null || url.isEmpty) return false;
+    setState(() {
+      _repoMessages[repo.id] =
+          '${_operationMessage(result)}. Opening GitHub credential sign-in.';
+    });
+    final loginSucceeded = await _startGitHubCredentialLogin(repo);
+    if (loginSucceeded) {
+      return true;
+    }
+    await _openUrlInChrome(url);
+    return false;
+  }
+
+  String? _githubAccessUrl(String remoteUrl) {
+    final repoUrl = _githubBrowserUrl(remoteUrl);
+    if (repoUrl == null || repoUrl.isEmpty) return null;
+    final uri = Uri.tryParse(repoUrl);
+    if (uri == null || !uri.host.toLowerCase().contains('github.com')) {
+      return repoUrl;
+    }
+    return Uri.https('github.com', '/login', {
+      'return_to': uri.path,
+    }).toString();
+  }
+
+  Future<bool> _startGitHubCredentialLogin(RepositoryInfo repo) async {
+    final repoUrl = _githubBrowserUrl(repo.remoteUrl);
+    final uri = repoUrl == null ? null : Uri.tryParse(repoUrl);
+    if (uri == null || !uri.host.toLowerCase().contains('github.com')) {
+      return false;
+    }
+    final configuredAccount = await Process.run('git', [
+      '-C',
+      repo.path,
+      'config',
+      '--get-urlmatch',
+      'credential.username',
+      repo.remoteUrl,
+    ]);
+    final username = configuredAccount.exitCode == 0
+        ? '${configuredAccount.stdout}'.trim()
+        : '';
+    final args = <String>[
+      'credential-manager',
+      'github',
+      'login',
+      '--url',
+      '${uri.scheme}://${uri.host}',
+      '--browser',
+    ];
+    if (username.isNotEmpty) {
+      args.addAll(['--username', username]);
+    }
+    try {
+      final result = await Process.run(
+        'git',
+        args,
+      ).timeout(const Duration(minutes: 5));
+      return result.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String? _githubBrowserUrl(String remoteUrl) {
+    final value = remoteUrl.trim();
+    if (value.isEmpty) return null;
+
+    final sshMatch = RegExp(
+      r'^(?:ssh://)?git@github\.com[:/](.+?)(?:\.git)?/?$',
+      caseSensitive: false,
+    ).firstMatch(value);
+    if (sshMatch != null) {
+      return 'https://github.com/${sshMatch.group(1)}';
+    }
+
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.host.isEmpty) return value;
+    if (!uri.host.toLowerCase().contains('github.com')) {
+      return uri.replace(userInfo: '').toString();
+    }
+    var path = uri.path;
+    if (path.endsWith('/')) path = path.substring(0, path.length - 1);
+    if (path.toLowerCase().endsWith('.git')) {
+      path = path.substring(0, path.length - 4);
+    }
+    return Uri(scheme: 'https', host: 'github.com', path: path).toString();
+  }
+
   Future<void> _downloadAndInstallUpdate() async {
     var release = _latestRelease;
     if (release == null) {
@@ -629,6 +737,27 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
     await Process.start('xdg-open', [url]);
   }
 
+  Future<void> _openUrlInChrome(String url) async {
+    if (!Platform.isWindows) {
+      await _openUrl(url);
+      return;
+    }
+    final chromeCandidates = <String>[
+      'chrome',
+      r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+      r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+    ];
+    for (final executable in chromeCandidates) {
+      try {
+        await Process.start(executable, [url], mode: ProcessStartMode.detached);
+        return;
+      } catch (_) {
+        // Try the next known Chrome location, then fall back to the OS handler.
+      }
+    }
+    await _openUrl(url);
+  }
+
   Future<void> _chooseRepository() async {
     final path = await FilePicker.getDirectoryPath(
       dialogTitle: 'Choose a Git repository',
@@ -742,6 +871,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
 
   Future<void> _refreshBranch(RepositoryInfo repo, TrackedBranch branch) async {
     await _guardedRepo(repo, () async {
+      await _git.fetchBranches(repo.path);
       await _refreshBranchStatus(repo, branch);
     });
   }
@@ -814,11 +944,27 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         });
         return;
       }
-      final result = await _git.pushBranch(
+      var result = await _git.pushBranch(
         worktreePath: repo.path,
         branchName: branch.branchName,
       );
       await _recordOperation(result, repo: repo);
+      if (!result.success && _isGitAccessFailure(result)) {
+        final authenticated = await _openAccessPageForFailure(repo, result);
+        if (authenticated) {
+          setState(() {
+            _repoMessages[repo.id] =
+                'GitHub sign-in completed. Retrying push for ${branch.branchName}.';
+          });
+          result = await _git.pushBranch(
+            worktreePath: repo.path,
+            branchName: branch.branchName,
+          );
+          await _recordOperation(result, repo: repo);
+        }
+      } else {
+        await _openAccessPageForFailure(repo, result);
+      }
       if (result.success) {
         _clearCommittedDraft(repo.id, branch.branchName);
       }
@@ -1034,11 +1180,29 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
         return;
       }
       if (request.pushAfterSync && committedCurrentBranch) {
-        final pushCurrentResult = await _git.pushBranch(
+        var pushCurrentResult = await _git.pushBranch(
           worktreePath: repo.path,
           branchName: activeBranch,
         );
         await _recordOperation(pushCurrentResult, repo: repo);
+        if (!pushCurrentResult.success &&
+            _isGitAccessFailure(pushCurrentResult)) {
+          final authenticated = await _openAccessPageForFailure(
+            repo,
+            pushCurrentResult,
+          );
+          if (authenticated) {
+            setState(() {
+              _repoMessages[repo.id] =
+                  'GitHub sign-in completed. Retrying push for $activeBranch.';
+            });
+            pushCurrentResult = await _git.pushBranch(
+              worktreePath: repo.path,
+              branchName: activeBranch,
+            );
+            await _recordOperation(pushCurrentResult, repo: repo);
+          }
+        }
         if (!pushCurrentResult.success) {
           await _refreshCurrentBranch(repo);
           await _refreshTrackedBranches(repo);
@@ -1115,6 +1279,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
           },
         );
         await _recordOperation(result, repo: repo);
+        await _openAccessPageForFailure(repo, result);
         await _restoreStartBranchAfterSync(
           repo: repo,
           syncResult: result,
@@ -1380,8 +1545,11 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
   Future<void> _refreshTrackedBranches(
     RepositoryInfo repo, {
     bool persist = true,
-    bool fetch = true,
+    bool fetch = false,
   }) async {
+    if (fetch) {
+      await _git.fetchBranches(repo.path);
+    }
     final currentBranch = await _refreshCurrentBranch(repo);
     final next = <TrackedBranch>[];
     for (final branch in _branches.where(
@@ -1391,7 +1559,7 @@ class _GitWorkflowHomeState extends State<GitWorkflowHome> {
       final status = await _git.getBranchStatus(
         repo.path,
         upstream,
-        fetch: fetch,
+        fetch: false,
         revision: branch.branchName == currentBranch
             ? 'HEAD'
             : branch.branchName,

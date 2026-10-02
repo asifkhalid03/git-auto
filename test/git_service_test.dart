@@ -25,6 +25,67 @@ void main() {
     externalCleanup.clear();
   });
 
+  test('checkout and status do not fetch remote changes', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+    final repoPath = fixture.repoDir.path;
+    final before = await _runGit(['rev-parse', 'origin/branch-b'], repoPath);
+    await _runGit(['switch', 'branch-b'], fixture.otherDir);
+    await _runGit([
+      'commit',
+      '--allow-empty',
+      '-m',
+      'Remote update',
+    ], fixture.otherDir);
+    await _runGit(['push', 'origin', 'branch-b'], fixture.otherDir);
+
+    final checkout = await git.checkoutBranch(
+      repoPath: repoPath,
+      branchName: 'branch-b',
+    );
+    expect(checkout.success, isTrue, reason: checkout.summary);
+    final afterCheckout = await _runGit([
+      'rev-parse',
+      'origin/branch-b',
+    ], repoPath);
+    expect(afterCheckout.stdout, before.stdout);
+
+    final cachedStatus = await git.getBranchStatus(repoPath, 'origin/branch-b');
+    expect(cachedStatus.behindCount, 0);
+    final afterStatus = await _runGit([
+      'rev-parse',
+      'origin/branch-b',
+    ], repoPath);
+    expect(afterStatus.stdout, before.stdout);
+
+    await git.fetchBranches(repoPath);
+    final refreshed = await git.getBranchStatus(repoPath, 'origin/branch-b');
+    expect(refreshed.behindCount, 1);
+  });
+
+  test('checkout of a cached remote branch works without fetching', () async {
+    final fixture = await _createThreeBranchRemoteRepo(tempDir);
+    final repoPath = fixture.repoDir.path;
+    await _runGit(['branch', '-D', 'branch-b'], repoPath);
+    await _runGit(['switch', 'branch-b'], fixture.otherDir);
+    await _runGit([
+      'commit',
+      '--allow-empty',
+      '-m',
+      'Remote update',
+    ], fixture.otherDir);
+    await _runGit(['push', 'origin', 'branch-b'], fixture.otherDir);
+    final cached = await _runGit(['rev-parse', 'origin/branch-b'], repoPath);
+
+    final checkout = await git.checkoutBranch(
+      repoPath: repoPath,
+      branchName: 'branch-b',
+    );
+    expect(checkout.success, isTrue, reason: checkout.summary);
+    final head = await _runGit(['rev-parse', 'HEAD'], repoPath);
+    expect(head.stdout, cached.stdout);
+    expect(await git.upstreamFor(repoPath, 'branch-b'), 'origin/branch-b');
+  });
+
   test('validateRepository rejects a non-git folder', () async {
     await expectLater(
       git.validateRepository(path: tempDir.path, id: 'repo-1'),
