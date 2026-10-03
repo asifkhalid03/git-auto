@@ -33,18 +33,18 @@ class GitWorkflowApp extends StatelessWidget {
           themeMode: mode,
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF5865F2),
+              seedColor: const Color(0xFF008577),
               brightness: Brightness.light,
             ),
-            scaffoldBackgroundColor: const Color(0xFFF7F9FD),
+            scaffoldBackgroundColor: const Color(0xFFF5F7F7),
             useMaterial3: true,
           ),
           darkTheme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
-              seedColor: const Color(0xFF8B8DFF),
+              seedColor: const Color(0xFF35D5C2),
               brightness: Brightness.dark,
             ),
-            scaffoldBackgroundColor: const Color(0xFF0F172A),
+            scaffoldBackgroundColor: const Color(0xFF151819),
             useMaterial3: true,
           ),
           home: const GitWorkflowHome(),
@@ -1918,7 +1918,7 @@ class RepositoryPicker extends StatelessWidget {
               const Icon(
                 Icons.folder_outlined,
                 size: 40,
-                color: Color(0xFF5865F2),
+                color: Color(0xFF008577),
               ),
               const SizedBox(width: 24),
               Column(
@@ -2138,10 +2138,11 @@ class RepositoryDashboard extends StatelessWidget {
                         builder: (context, headerConstraints) {
                           final repoSummary = Row(
                             children: [
-                              const Icon(
-                                Icons.folder_outlined,
-                                size: 42,
-                                color: Color(0xFF5865F2),
+                              Image.asset(
+                                'assets/branding/git-flow.png',
+                                width: 48,
+                                height: 48,
+                                semanticLabel: 'Git Flow',
                               ),
                               const SizedBox(width: 24),
                               Expanded(
@@ -2423,13 +2424,13 @@ bool isDarkMode(BuildContext context) =>
     Theme.of(context).brightness == Brightness.dark;
 
 Color surfaceColor(BuildContext context) =>
-    isDarkMode(context) ? const Color(0xFF111827) : Colors.white;
+    isDarkMode(context) ? const Color(0xFF1C2021) : Colors.white;
 
 Color elevatedSurfaceColor(BuildContext context) =>
-    isDarkMode(context) ? const Color(0xFF182235) : Colors.white;
+    isDarkMode(context) ? const Color(0xFF252A2B) : Colors.white;
 
 Color borderColor(BuildContext context) =>
-    isDarkMode(context) ? const Color(0xFF334155) : const Color(0xFFE0E5EE);
+    isDarkMode(context) ? const Color(0xFF404849) : const Color(0xFFE0E5EE);
 
 Color primaryTextColor(BuildContext context) =>
     isDarkMode(context) ? const Color(0xFFF8FAFC) : const Color(0xFF1F2937);
@@ -2493,7 +2494,7 @@ class BranchCard extends StatelessWidget {
             children: [
               Icon(
                 Icons.account_tree_outlined,
-                color: const Color(0xFF6D5DF2),
+                color: const Color(0xFF008577),
                 size: iconSize,
               ),
               SizedBox(width: 16 * scale),
@@ -2681,7 +2682,7 @@ class CurrentBranchHistoryPanel extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
             child: Row(
               children: [
-                const Icon(Icons.history, color: Color(0xFF5865F2), size: 18),
+                const Icon(Icons.history, color: Color(0xFF008577), size: 18),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Column(
@@ -2773,7 +2774,7 @@ class CommitHistoryTile extends StatelessWidget {
                   decoration: BoxDecoration(
                     color: isLatest
                         ? const Color(0xFFF59E0B)
-                        : const Color(0xFF60A5FA),
+                        : const Color(0xFF35B9AA),
                     shape: BoxShape.circle,
                     border: Border.all(
                       color: surfaceColor(context),
@@ -2784,7 +2785,7 @@ class CommitHistoryTile extends StatelessWidget {
                 if (!isLast)
                   const Expanded(
                     child: VerticalDivider(
-                      color: Color(0xFF93C5FD),
+                      color: Color(0xFF96D5CB),
                       width: 1,
                       thickness: 1,
                     ),
@@ -2882,7 +2883,7 @@ class CollapsedSidePanel extends StatelessWidget {
             message: tooltip,
             child: IconButton(
               onPressed: onExpand,
-              icon: Icon(icon, color: const Color(0xFF5865F2), size: 18),
+              icon: Icon(icon, color: const Color(0xFF008577), size: 18),
             ),
           ),
         ),
@@ -3044,7 +3045,7 @@ class _CurrentChangesPanelState extends State<CurrentChangesPanel> {
               children: [
                 const Icon(
                   Icons.difference_outlined,
-                  color: Color(0xFF5865F2),
+                  color: Color(0xFF008577),
                   size: 18,
                 ),
                 const SizedBox(width: 8),
@@ -3764,7 +3765,7 @@ class _BranchCardDropZoneState extends State<BranchCardDropZone> {
           duration: const Duration(milliseconds: 140),
           decoration: BoxDecoration(
             border: Border.all(
-              color: _hovering ? const Color(0xFF5865F2) : Colors.transparent,
+              color: _hovering ? const Color(0xFF008577) : Colors.transparent,
               width: 2,
             ),
             borderRadius: BorderRadius.circular(10),
@@ -3938,13 +3939,13 @@ class SyncMergePainter extends CustomPainter {
     if (source == null || destination == null || source == destination) return;
 
     final linePaint = Paint()
-      ..color = (active ? const Color(0xFF5865F2) : const Color(0xFF8A94A6))
+      ..color = (active ? const Color(0xFF008577) : const Color(0xFF8A94A6))
           .withValues(alpha: active ? 0.72 : 0.26)
       ..strokeWidth = active ? 4 : 2
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
     final dotPaint = Paint()
-      ..color = active ? const Color(0xFF5865F2) : const Color(0xFF8A94A6)
+      ..color = active ? const Color(0xFF008577) : const Color(0xFF8A94A6)
       ..style = PaintingStyle.fill;
     final sourcePaint = Paint()
       ..color = const Color(0xFFDD8500).withValues(alpha: active ? 0.22 : 0.08)
@@ -4014,14 +4015,14 @@ class SyncMergeLegend extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFFEEF1FF),
+        color: const Color(0xFFE5F5F1),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Row(
           children: [
-            const Icon(Icons.sync, size: 18, color: Color(0xFF5865F2)),
+            const Icon(Icons.sync, size: 18, color: Color(0xFF008577)),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -5188,8 +5189,8 @@ class SyncPreview extends StatelessWidget {
 
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFFF4F6FF),
-        border: Border.all(color: const Color(0xFFDDE2FF)),
+        color: const Color(0xFFF0F8F6),
+        border: Border.all(color: const Color(0xFFC8E4DC)),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
@@ -5225,7 +5226,7 @@ class SyncPreview extends StatelessWidget {
                     const Icon(
                       Icons.arrow_forward,
                       size: 18,
-                      color: Color(0xFF5865F2),
+                      color: Color(0xFF008577),
                     ),
                 ],
               ],
@@ -5271,9 +5272,9 @@ class BranchFlowChip extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: emphasized ? const Color(0xFF5865F2) : Colors.white,
+        color: emphasized ? const Color(0xFF008577) : Colors.white,
         border: Border.all(
-          color: emphasized ? const Color(0xFF5865F2) : const Color(0xFFD9DEEA),
+          color: emphasized ? const Color(0xFF008577) : const Color(0xFFD9DEEA),
         ),
         borderRadius: BorderRadius.circular(8),
       ),
@@ -5573,8 +5574,8 @@ class _PrePushCommandRunnerDialogState
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: isDarkMode(context)
-                        ? const Color(0xFF0B1220)
-                        : const Color(0xFFF7F9FD),
+                        ? const Color(0xFF161A1B)
+                        : const Color(0xFFF5F7F7),
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: borderColor(context)),
                   ),
@@ -5838,7 +5839,7 @@ class RepositoryTile extends StatelessWidget {
             color: surfaceColor(context),
             borderRadius: BorderRadius.circular(8),
             border: Border.all(
-              color: selected ? const Color(0xFF5865F2) : borderColor(context),
+              color: selected ? const Color(0xFF008577) : borderColor(context),
               width: selected ? 1.5 : 1,
             ),
           ),
@@ -5846,7 +5847,7 @@ class RepositoryTile extends StatelessWidget {
             children: [
               const Icon(
                 Icons.account_tree_outlined,
-                color: Color(0xFF5865F2),
+                color: Color(0xFF008577),
                 size: 34,
               ),
               const SizedBox(width: 28),
@@ -5869,7 +5870,7 @@ class RepositoryTile extends StatelessWidget {
               Icon(
                 selected ? Icons.check_circle : Icons.radio_button_unchecked,
                 color: selected
-                    ? const Color(0xFF5865F2)
+                    ? const Color(0xFF008577)
                     : const Color(0xFFD3DAE5),
                 size: 32,
               ),
@@ -5937,7 +5938,7 @@ class InfoNote extends StatelessWidget {
   Widget build(BuildContext context) {
     return DecoratedBox(
       decoration: BoxDecoration(
-        color: const Color(0xFFF2F1FF),
+        color: const Color(0xFFE5F5F1),
         borderRadius: BorderRadius.circular(8),
       ),
       child: Padding(
@@ -5945,7 +5946,7 @@ class InfoNote extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.info_outline, color: Color(0xFF5865F2), size: 18),
+            const Icon(Icons.info_outline, color: Color(0xFF008577), size: 18),
             const SizedBox(width: 10),
             Flexible(
               child: Text(
